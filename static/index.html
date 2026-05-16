@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RoSE Ground Station</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     HEADER
+════════════════════════════════════════════════════════════════════════ -->
+<header id="header">
+  <div class="header-left">
+    <div class="logo">
+      <span class="logo-icon">◈</span>
+      <span class="logo-text">RoSE Ground Station</span>
+    </div>
+    <nav class="tab-nav" id="tabNav">
+      <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+      <button class="tab-btn" data-tab="logs">Logs</button>
+      <button class="tab-btn" data-tab="files">Files</button>
+      <button class="tab-btn" data-tab="system">System Overview</button>
+      <button class="tab-btn" data-tab="payload">Payload</button>
+      <button class="tab-btn" data-tab="arm">Arm</button>
+    </nav>
+  </div>
+  <div class="header-right">
+    <!-- Ground station access URL — click to copy -->
+    <div class="gs-url-chip" id="gsUrlChip" title="Click to copy URL">
+      <span class="gs-url-icon">⊕</span>
+      <span id="gsUrlText">Loading…</span>
+      <span class="gs-url-copied hidden" id="gsUrlCopied">Copied!</span>
+    </div>
+    <div class="controller-status" id="controllerStatus">
+      <span class="status-dot dot-red" id="controllerDot"></span>
+      <span id="controllerLabel">No Controller</span>
+    </div>
+    <div class="api-status" id="apiStatus">
+      <span class="status-dot dot-yellow" id="apiDot"></span>
+      <span id="apiLabel">Connecting…</span>
+    </div>
+    <button class="estop-btn" id="estopBtn">
+      <span class="estop-icon">⚠</span>
+      E-STOP
+    </button>
+  </div>
+</header>
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     PASSWORD OVERLAY — shown until authenticated
+════════════════════════════════════════════════════════════════════════ -->
+<div id="authOverlay">
+  <div class="auth-box">
+    <div class="auth-logo">
+      <span class="auth-logo-icon">◈</span>
+      <span class="auth-logo-text">RoSE Ground Station</span>
+    </div>
+    <div class="auth-title">Secure Access</div>
+    <div class="auth-connect-url" id="authConnectUrl"></div>
+    <form id="authForm" autocomplete="off">
+      <div class="auth-field">
+        <label class="auth-label" for="authPassword">Password</label>
+        <input
+          type="password"
+          id="authPassword"
+          class="auth-input"
+          placeholder="Enter access password"
+          autofocus
+          autocomplete="current-password"
+        />
+      </div>
+      <div class="auth-error hidden" id="authError"></div>
+      <button type="submit" class="auth-submit" id="authSubmit">
+        <span id="authSubmitLabel">Connect</span>
+      </button>
+    </form>
+    <div class="auth-footer">
+      Set <code>GS_PASSWORD</code> env var to configure the password
+    </div>
+  </div>
+</div>
+
+<!-- Toast notifications -->
+<div id="toastContainer"></div>
+
+<!-- E-STOP overlay -->
+<div id="estopOverlay" class="hidden">
+  <div class="estop-overlay-box">
+    <div class="estop-overlay-icon">⚠</div>
+    <div class="estop-overlay-title">EMERGENCY STOP ACTIVATED</div>
+    <div class="estop-overlay-sub">All drive commands halted</div>
+    <button class="btn-reset-estop" id="resetEstopBtn">Reset E-Stop</button>
+  </div>
+</div>
+
+<!-- Warning config modal -->
+<div id="warningModal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span>Telemetry Warning Thresholds</span>
+      <button class="modal-close" id="closeWarningModal">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="warn-section">
+        <label class="warn-label">State of Charge (%)</label>
+        <div class="warn-row">
+          <div class="warn-field">
+            <span>Warning</span>
+            <input type="number" id="wcSocWarn" min="0" max="100" step="1" />
+          </div>
+          <div class="warn-field">
+            <span>Critical</span>
+            <input type="number" id="wcSocCrit" min="0" max="100" step="1" />
+          </div>
+        </div>
+      </div>
+      <div class="warn-section">
+        <label class="warn-label">Current (A)</label>
+        <div class="warn-row">
+          <div class="warn-field">
+            <span>Warning</span>
+            <input type="number" id="wcCurWarn" min="0" max="100" step="0.5" />
+          </div>
+          <div class="warn-field">
+            <span>Critical</span>
+            <input type="number" id="wcCurCrit" min="0" max="100" step="0.5" />
+          </div>
+        </div>
+      </div>
+      <div class="warn-section">
+        <label class="warn-label">Temperature (°C)</label>
+        <div class="warn-row">
+          <div class="warn-field">
+            <span>Warning</span>
+            <input type="number" id="wcTempWarn" min="0" max="150" step="1" />
+          </div>
+          <div class="warn-field">
+            <span>Critical</span>
+            <input type="number" id="wcTempCrit" min="0" max="150" step="1" />
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" id="cancelWarningModal">Cancel</button>
+      <button class="btn-primary" id="saveWarningModal">Save Thresholds</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════
+     MAIN CONTENT
+════════════════════════════════════════════════════════════════════════ -->
+<main id="main">
+
+  <!-- ── DASHBOARD ────────────────────────────────────────────────── -->
+  <div class="tab-content active" id="tab-dashboard">
+
+    <!-- Camera grid -->
+    <section class="section cameras-section">
+      <div class="section-header"><span>Camera Feeds</span></div>
+      <div class="camera-grid">
+        <div class="camera-cell" id="cam0">
+          <div class="camera-label">FRONT</div>
+          <img class="camera-img" id="camImg0" src="/api/camera/0" alt="Front camera" />
+          <div class="camera-error hidden" id="camErr0">
+            <span class="cam-err-icon">⊗</span>
+            <span>Feed unavailable</span>
+          </div>
+        </div>
+        <div class="camera-cell" id="cam1">
+          <div class="camera-label">REAR</div>
+          <img class="camera-img" id="camImg1" src="/api/camera/1" alt="Rear camera" />
+          <div class="camera-error hidden" id="camErr1">
+            <span class="cam-err-icon">⊗</span>
+            <span>Feed unavailable</span>
+          </div>
+        </div>
+        <div class="camera-cell" id="cam2">
+          <div class="camera-label">LEFT</div>
+          <img class="camera-img" id="camImg2" src="/api/camera/2" alt="Left camera" />
+          <div class="camera-error hidden" id="camErr2">
+            <span class="cam-err-icon">⊗</span>
+            <span>Feed unavailable</span>
+          </div>
+        </div>
+        <div class="camera-cell" id="cam3">
+          <div class="camera-label">RIGHT</div>
+          <img class="camera-img" id="camImg3" src="/api/camera/3" alt="Right camera" />
+          <div class="camera-error hidden" id="camErr3">
+            <span class="cam-err-icon">⊗</span>
+            <span>Feed unavailable</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Telemetry + GPS row -->
+    <div class="bottom-row">
+
+      <!-- Telemetry -->
+      <section class="section telemetry-section">
+        <div class="section-header">
+          <span>Telemetry</span>
+          <button class="icon-btn" id="openWarningModal" title="Configure warning levels">⚙</button>
+        </div>
+        <div class="telemetry-grid">
+
+          <!-- SOC -->
+          <div class="telem-card" id="socCard">
+            <div class="telem-top">
+              <span class="telem-label">State of Charge</span>
+              <span class="telem-badge" id="socBadge">OK</span>
+            </div>
+            <div class="telem-value"><span id="socVal">—</span><span class="telem-unit">%</span></div>
+            <div class="telem-bar-bg">
+              <div class="telem-bar" id="socBar" style="width:0%"></div>
+            </div>
+            <div class="telem-thresholds">
+              <span>Warn: <span id="socWarnTh">30</span>%</span>
+              <span>Crit: <span id="socCritTh">15</span>%</span>
+            </div>
+          </div>
+
+          <!-- Current -->
+          <div class="telem-card" id="curCard">
+            <div class="telem-top">
+              <span class="telem-label">Current Draw</span>
+              <span class="telem-badge" id="curBadge">OK</span>
+            </div>
+            <div class="telem-value"><span id="curVal">—</span><span class="telem-unit">A</span></div>
+            <div class="telem-bar-bg">
+              <div class="telem-bar" id="curBar" style="width:0%"></div>
+            </div>
+            <div class="telem-thresholds">
+              <span>Warn: <span id="curWarnTh">20</span>A</span>
+              <span>Crit: <span id="curCritTh">30</span>A</span>
+            </div>
+          </div>
+
+          <!-- Temperature -->
+          <div class="telem-card" id="tempCard">
+            <div class="telem-top">
+              <span class="telem-label">Temperature</span>
+              <span class="telem-badge" id="tempBadge">OK</span>
+            </div>
+            <div class="telem-value"><span id="tempVal">—</span><span class="telem-unit">°C</span></div>
+            <div class="telem-bar-bg">
+              <div class="telem-bar" id="tempBar" style="width:0%"></div>
+            </div>
+            <div class="telem-thresholds">
+              <span>Warn: <span id="tempWarnTh">60</span>°C</span>
+              <span>Crit: <span id="tempCritTh">80</span>°C</span>
+            </div>
+          </div>
+
+          <!-- Voltage -->
+          <div class="telem-card telem-card-sm">
+            <div class="telem-label">Voltage</div>
+            <div class="telem-value-sm"><span id="voltVal">—</span><span class="telem-unit">V</span></div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- GPS Map -->
+      <section class="section gps-section">
+        <div class="section-header">
+          <span>GPS / GNSS</span>
+          <span class="gps-fix-badge" id="gpsBadge">NO FIX</span>
+        </div>
+        <div id="gpsMap"></div>
+        <div class="gps-coords" id="gpsCoords">
+          <span>Lat: <span id="gpsLat">—</span></span>
+          <span>Lon: <span id="gpsLon">—</span></span>
+          <span>Fix: <span id="gpsFix">—</span></span>
+          <span>Sats: <span id="gpsSats">—</span></span>
+          <span class="gps-updated" id="gpsUpdated"></span>
+        </div>
+      </section>
+
+    </div>
+  </div><!-- /tab-dashboard -->
+
+
+  <!-- ── LOGS ─────────────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-logs">
+    <section class="section logs-section">
+      <div class="section-header">
+        <span>Live Logs</span>
+        <div class="logs-controls">
+          <input type="text" id="logSearch" class="log-search" placeholder="Search logs…" />
+          <select id="logLevelFilter" class="log-level-filter">
+            <option value="ALL">ALL</option>
+            <option value="DEBUG">DEBUG</option>
+            <option value="INFO">INFO</option>
+            <option value="WARN">WARN</option>
+            <option value="ERROR">ERROR</option>
+          </select>
+          <button class="btn-secondary btn-sm" id="logClearBtn">Clear</button>
+          <label class="log-autoscroll-label">
+            <input type="checkbox" id="logAutoScroll" checked /> Auto-scroll
+          </label>
+        </div>
+      </div>
+      <div class="log-console" id="logConsole"></div>
+      <div class="log-stats">
+        <span>Total: <span id="logTotal">0</span></span>
+        <span class="log-stat-error">Errors: <span id="logErrorCount">0</span></span>
+        <span class="log-stat-warn">Warnings: <span id="logWarnCount">0</span></span>
+      </div>
+    </section>
+  </div><!-- /tab-logs -->
+
+
+  <!-- ── FILES ────────────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-files">
+    <section class="section files-section">
+      <div class="section-header"><span>External Storage</span></div>
+      <div class="files-body">
+        <div class="files-icon">⬡</div>
+        <p class="files-desc">Connect an external storage device to browse rover log files and collected data.</p>
+        <button class="btn-primary btn-lg" id="getFilesBtn">
+          <span id="getFilesBtnIcon">⇓</span>
+          Get Files
+        </button>
+        <div class="files-status" id="filesStatus"></div>
+      </div>
+    </section>
+  </div><!-- /tab-files -->
+
+
+  <!-- ── ROVER SYSTEM OVERVIEW ─────────────────────────────────────── -->
+  <div class="tab-content" id="tab-system">
+    <div class="system-grid">
+
+      <!-- System Health -->
+      <section class="section sys-card">
+        <div class="section-header"><span>System Health</span></div>
+        <div class="sys-status-row">
+          <div class="sys-status-item" id="sysPayloadConn">
+            <span class="status-dot dot-green"></span>
+            <span class="sys-item-label">Payload</span>
+            <span class="sys-item-val" id="sysPayloadVal">Connected</span>
+          </div>
+          <div class="sys-status-item" id="sysArmConn">
+            <span class="status-dot dot-green"></span>
+            <span class="sys-item-label">Arm</span>
+            <span class="sys-item-val" id="sysArmVal">Connected</span>
+          </div>
+          <div class="sys-status-item">
+            <span class="status-dot dot-green"></span>
+            <span class="sys-item-label">IMU</span>
+            <span class="sys-item-val">Online</span>
+          </div>
+          <div class="sys-status-item">
+            <span class="status-dot dot-green"></span>
+            <span class="sys-item-label">GNSS Module</span>
+            <span class="sys-item-val">Online</span>
+          </div>
+          <div class="sys-status-item">
+            <span class="status-dot dot-yellow"></span>
+            <span class="sys-item-label">Radio Link</span>
+            <span class="sys-item-val">72% signal</span>
+          </div>
+          <div class="sys-status-item">
+            <span class="status-dot dot-green"></span>
+            <span class="sys-item-label">CAN Bus</span>
+            <span class="sys-item-val">Nominal</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Compute — Jetson -->
+      <section class="section sys-card">
+        <div class="section-header"><span>Compute — Jetson Orin</span></div>
+        <div class="compute-grid">
+          <div class="compute-item">
+            <div class="compute-label">CPU Temperature</div>
+            <div class="compute-val" id="sysJetsonTemp">67.3 °C</div>
+            <div class="telem-bar-bg"><div class="telem-bar" id="sysJetsonTempBar" style="width:56%"></div></div>
+          </div>
+          <div class="compute-item">
+            <div class="compute-label">CPU Usage</div>
+            <div class="compute-val" id="sysCpuPct">34.0 %</div>
+            <div class="telem-bar-bg"><div class="telem-bar" id="sysCpuBar" style="width:34%"></div></div>
+          </div>
+          <div class="compute-item">
+            <div class="compute-label">Memory</div>
+            <div class="compute-val" id="sysRam">6.2 / 16.0 GB</div>
+            <div class="telem-bar-bg"><div class="telem-bar" id="sysRamBar" style="width:38%"></div></div>
+          </div>
+          <div class="compute-item">
+            <div class="compute-label">Uptime</div>
+            <div class="compute-val" id="sysUptime">—</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- LED Indicators -->
+      <section class="section sys-card led-card">
+        <div class="section-header"><span>LED Indicators</span></div>
+        <div class="led-grid" id="ledGrid">
+          <!-- injected by JS -->
+          <div class="led-item">
+            <div class="led-swatch" style="background:#ff0000;box-shadow:0 0 10px #ff0000aa"></div>
+            <div class="led-info">
+              <div class="led-label">Port Bow</div>
+              <div class="led-state">ON · R255 G0 B0</div>
+            </div>
+          </div>
+          <div class="led-item">
+            <div class="led-swatch" style="background:#00ff00;box-shadow:0 0 10px #00ff00aa"></div>
+            <div class="led-info">
+              <div class="led-label">Starboard Bow</div>
+              <div class="led-state">ON · R0 G255 B0</div>
+            </div>
+          </div>
+          <div class="led-item">
+            <div class="led-swatch" style="background:#333;box-shadow:none"></div>
+            <div class="led-info">
+              <div class="led-label">Port Stern</div>
+              <div class="led-state led-off">OFF · R0 G0 B255</div>
+            </div>
+          </div>
+          <div class="led-item">
+            <div class="led-swatch" style="background:#ffffff;box-shadow:0 0 10px #ffffffaa"></div>
+            <div class="led-info">
+              <div class="led-label">Star. Stern</div>
+              <div class="led-state">ON · R255 G255 B255</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Power Distribution -->
+      <section class="section sys-card">
+        <div class="section-header"><span>Power Distribution</span></div>
+        <div class="power-table">
+          <div class="power-row power-header">
+            <span>Rail</span><span>Voltage</span><span>Current</span><span>Status</span>
+          </div>
+          <div class="power-row">
+            <span>Drive Motors</span><span>24.1 V</span><span>4.8 A</span>
+            <span class="badge-ok">OK</span>
+          </div>
+          <div class="power-row">
+            <span>Arm</span><span>24.0 V</span><span>1.2 A</span>
+            <span class="badge-ok">OK</span>
+          </div>
+          <div class="power-row">
+            <span>Payload</span><span>12.0 V</span><span>2.1 A</span>
+            <span class="badge-ok">OK</span>
+          </div>
+          <div class="power-row">
+            <span>Jetson 5V</span><span>5.0 V</span><span>3.5 A</span>
+            <span class="badge-ok">OK</span>
+          </div>
+          <div class="power-row">
+            <span>Comms/Radio</span><span>5.0 V</span><span>0.4 A</span>
+            <span class="badge-ok">OK</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Drive System -->
+      <section class="section sys-card">
+        <div class="section-header"><span>Drive System</span></div>
+        <div class="drive-table">
+          <div class="drive-row drive-header">
+            <span>Motor</span><span>Temp</span><span>RPM</span><span>Status</span>
+          </div>
+          <div class="drive-row">
+            <span>FL</span><span>41.2 °C</span><span>312</span>
+            <span class="badge-ok">OK</span>
+          </div>
+          <div class="drive-row">
+            <span>FR</span><span>39.8 °C</span><span>315</span>
+            <span class="badge-ok">OK</span>
+          </div>
+          <div class="drive-row">
+            <span>RL</span><span>43.1 °C</span><span>308</span>
+            <span class="badge-ok">OK</span>
+          </div>
+          <div class="drive-row">
+            <span>RR</span><span>40.5 °C</span><span>310</span>
+            <span class="badge-ok">OK</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Network -->
+      <section class="section sys-card">
+        <div class="section-header"><span>Network &amp; Communication</span></div>
+        <div class="net-items">
+          <div class="net-row">
+            <span class="net-label">Ground Station IP</span>
+            <span class="net-val mono">192.168.10.1</span>
+          </div>
+          <div class="net-row">
+            <span class="net-label">Rover IP</span>
+            <span class="net-val mono">192.168.10.100</span>
+          </div>
+          <div class="net-row">
+            <span class="net-label">Latency</span>
+            <span class="net-val">8 ms</span>
+          </div>
+          <div class="net-row">
+            <span class="net-label">Radio Band</span>
+            <span class="net-val">5.8 GHz</span>
+          </div>
+          <div class="net-row">
+            <span class="net-label">TX Rate</span>
+            <span class="net-val">12 Mbps</span>
+          </div>
+          <div class="net-row">
+            <span class="net-label">RX Rate</span>
+            <span class="net-val">2.4 Mbps</span>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </div><!-- /tab-system -->
+
+
+  <!-- ── PAYLOAD ──────────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-payload">
+    <div class="subsys-header" id="payloadHeader">
+      <span class="status-dot" id="payloadDot"></span>
+      <span id="payloadStatusLabel">Checking…</span>
+    </div>
+    <div class="subsys-body" id="payloadBody">
+
+      <!-- Elevator Steppers -->
+      <section class="section ctrl-section">
+        <div class="section-header"><span>Elevator Steppers</span></div>
+        <div class="ctrl-body">
+          <div class="ctrl-increment-row">
+            <label class="ctrl-label">Increment</label>
+            <input type="number" id="elevatorMm" class="ctrl-input" value="5" min="0.1" max="500" step="0.1" />
+            <span class="ctrl-unit">mm</span>
+          </div>
+          <div class="ctrl-arrows">
+            <button class="ctrl-arrow-btn ctrl-up" id="elevatorUp">▲<br/><span>UP</span></button>
+            <button class="ctrl-arrow-btn ctrl-down" id="elevatorDown">▼<br/><span>DOWN</span></button>
+          </div>
+          <div class="ctrl-feedback" id="elevatorFeedback"></div>
+        </div>
+      </section>
+
+      <!-- Carousel -->
+      <section class="section ctrl-section">
+        <div class="section-header"><span>Carousel</span></div>
+        <div class="ctrl-body">
+          <div class="ctrl-increment-row">
+            <label class="ctrl-label">Step Size</label>
+            <input type="number" id="carouselSteps" class="ctrl-input" value="10" min="1" max="10000" step="1" />
+            <span class="ctrl-unit">steps</span>
+          </div>
+          <div class="ctrl-arrows ctrl-rotate">
+            <button class="ctrl-arrow-btn ctrl-ccw" id="carouselCCW">↺<br/><span>CCW</span></button>
+            <button class="ctrl-arrow-btn ctrl-cw"  id="carouselCW">↻<br/><span>CW</span></button>
+          </div>
+          <div class="ctrl-feedback" id="carouselFeedback"></div>
+        </div>
+      </section>
+
+      <!-- Auger -->
+      <section class="section ctrl-section">
+        <div class="section-header"><span>Auger</span></div>
+        <div class="ctrl-body auger-body">
+          <div class="auger-speed-row">
+            <label class="ctrl-label">Speed</label>
+            <input type="range" id="augerSlider" class="auger-slider" min="0" max="100" step="1" value="0" />
+            <span class="auger-pct" id="augerPct">0%</span>
+          </div>
+          <button class="auger-toggle" id="augerToggle" data-on="false">
+            <span id="augerToggleLabel">OFF</span>
+          </button>
+          <div class="ctrl-feedback" id="augerFeedback"></div>
+        </div>
+      </section>
+
+    </div><!-- /payloadBody -->
+  </div><!-- /tab-payload -->
+
+
+  <!-- ── ARM ──────────────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-arm">
+    <div class="subsys-header" id="armHeader">
+      <span class="status-dot" id="armDot"></span>
+      <span id="armStatusLabel">Checking…</span>
+    </div>
+    <div class="subsys-body" id="armBody">
+      <div class="arm-placeholder">
+        <span class="arm-placeholder-icon">⚙</span>
+        <span class="arm-placeholder-text">Arm controls coming soon</span>
+      </div>
+    </div>
+  </div><!-- /tab-arm -->
+
+</main><!-- /main -->
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -137,6 +137,13 @@ async def _telemetry_broadcast():
                 "gnss": bridge.get_gnss(),
                 "payload_connected": bridge.is_payload_connected(),
                 "arm_connected": bridge.is_arm_connected(),
+                "drive_connected": bridge.is_drive_connected(),
+                "subsystems": bridge.get_subsystems(),
+                "comms": bridge.get_comms(),
+                "payload_arduino": bridge.get_payload_arduino(),
+                "life_analysis": bridge.get_life_analysis(),
+                "led_controller": bridge.get_led_controller(),
+                "motor_telemetry": bridge.get_motor_telemetry(),
                 "ts": time.time(),
             }
             await telemetry_mgr.broadcast(payload)
@@ -359,7 +366,30 @@ async def get_warnings(_t: str = Depends(require_auth)):
 
 @app.get("/api/system")
 async def system_overview(_t: str = Depends(require_auth)):
-    return bridge.get_system()
+    system = bridge.get_system()
+    system["subsystems"] = bridge.get_subsystems()
+    system["comms"] = bridge.get_comms()
+    system["payload_arduino"] = bridge.get_payload_arduino()
+    system["life_analysis"] = bridge.get_life_analysis()
+    system["led_controller"] = bridge.get_led_controller()
+    system["motor_telemetry"] = bridge.get_motor_telemetry()
+    return system
+
+
+@app.get("/api/subsystems")
+async def subsystem_overview(_t: str = Depends(require_auth)):
+    return {
+        "subsystems": bridge.get_subsystems(),
+        "comms": bridge.get_comms(),
+    }
+
+
+@app.post("/api/camera360/capture")
+async def capture_360_image(_t: str = Depends(require_auth)):
+    try:
+        return {"ok": True, "capture": bridge.capture_360_image()}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.get("/api/files")
@@ -372,21 +402,21 @@ async def list_files(_t: str = Depends(require_auth)):
 
 @app.get("/api/payload/status")
 async def payload_status(_t: str = Depends(require_auth)):
-    return {"connected": bridge.is_payload_connected()}
+    return {"connected": bridge.is_payload_connected(), "arduino": bridge.get_payload_arduino()}
 
 
 class ElevatorCommand(BaseModel):
     direction: str = Field(..., pattern="^(up|down)$")
-    mm: float = Field(..., gt=0, le=500)
+    steps: int = Field(..., gt=0, le=100000)
 
 
 @app.post("/api/payload/elevator")
 async def payload_elevator(cmd: ElevatorCommand, _t: str = Depends(require_auth)):
     if not bridge.is_payload_connected():
         raise HTTPException(status_code=503, detail="Payload subsystem not connected")
-    mm = cmd.mm if cmd.direction == "up" else -cmd.mm
-    bridge.send_elevator(mm)
-    return {"ok": True, "direction": cmd.direction, "mm": abs(mm)}
+    steps = cmd.steps if cmd.direction == "up" else -cmd.steps
+    bridge.send_elevator(steps)
+    return {"ok": True, "direction": cmd.direction, "steps": abs(steps)}
 
 
 class CarouselCommand(BaseModel):
@@ -416,9 +446,79 @@ async def payload_auger(cmd: AugerCommand, _t: str = Depends(require_auth)):
     return {"ok": True, "speed": cmd.speed, "enabled": cmd.enabled}
 
 
+class LifeRadarResult(BaseModel):
+    labels: list[str] = Field(default_factory=list)
+    values: list[float] = Field(default_factory=list)
+    image_data_url: Optional[str] = None
+    summary: Optional[str] = None
+
+
+@app.post("/api/payload/life-analysis/start")
+async def start_life_analysis(_t: str = Depends(require_auth)):
+    if not bridge.is_payload_connected():
+        raise HTTPException(status_code=503, detail="Payload subsystem not connected")
+    bridge.start_life_analysis()
+    return {"ok": True, "life_analysis": bridge.get_life_analysis()}
+
+
+@app.post("/api/payload/life-analysis/radar")
+async def life_analysis_radar(result: LifeRadarResult, _t: str = Depends(require_auth)):
+    if result.labels and len(result.labels) != len(result.values):
+        raise HTTPException(status_code=400, detail="labels and values must be the same length")
+    radar = result.dict()
+    bridge.set_life_analysis_radar(radar)
+    return {"ok": True, "life_analysis": bridge.get_life_analysis()}
+
+
 @app.get("/api/arm/status")
 async def arm_status(_t: str = Depends(require_auth)):
     return {"connected": bridge.is_arm_connected()}
+
+
+class ArmJointCommand(BaseModel):
+    base: float = Field(0.0, ge=-180, le=180)
+    shoulder: float = Field(0.0, ge=-180, le=180)
+    elbow: float = Field(0.0, ge=-180, le=180)
+    wrist: float = Field(0.0, ge=-180, le=180)
+
+
+@app.post("/api/arm/joints")
+async def arm_joints(cmd: ArmJointCommand, _t: str = Depends(require_auth)):
+    raise HTTPException(status_code=410, detail="Manual arm commands are disabled in this ground station")
+
+
+@app.get("/api/drive/status")
+async def drive_status(_t: str = Depends(require_auth)):
+    return {"connected": bridge.is_drive_connected()}
+
+
+class DriveCommand(BaseModel):
+    linear: float = Field(..., ge=-1.0, le=1.0)
+    angular: float = Field(..., ge=-1.0, le=1.0)
+
+
+@app.post("/api/drive/twist")
+async def drive_twist(cmd: DriveCommand, _t: str = Depends(require_auth)):
+    raise HTTPException(status_code=410, detail="Manual drive commands are disabled in this ground station")
+
+
+class ClearMotorFaultsRequest(BaseModel):
+    group: str
+    device_id: int = Field(..., ge=0, le=255, description="SPARK CAN device ID, or 0 for all motors in group")
+
+
+@app.get("/api/motors")
+async def motor_telemetry(_t: str = Depends(require_auth)):
+    return {"motor_telemetry": bridge.get_motor_telemetry()}
+
+
+@app.post("/api/motors/clear_faults")
+async def clear_motor_faults(req: ClearMotorFaultsRequest, _t: str = Depends(require_auth)):
+    try:
+        bridge.clear_motor_faults(req.group, req.device_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "group": req.group, "device_id": req.device_id}
 
 
 # ---------------------------------------------------------------------------

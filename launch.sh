@@ -16,6 +16,16 @@ else
   echo "[launch] No ROS2 installation found — running in mock mode"
 fi
 
+# Source rover workspace overlays when present so custom messages such as
+# gnc_interfaces/SparkMotorTelemetry are available to the ground station.
+if [ -n "${URC_ROS_WS:-}" ] && [ -f "${URC_ROS_WS}/install/setup.bash" ]; then
+  source "${URC_ROS_WS}/install/setup.bash"
+  echo "[launch] URC ROS2 workspace sourced from ${URC_ROS_WS}"
+elif [ -f "/home/roselab/urc_2026/install/setup.bash" ]; then
+  source /home/roselab/urc_2026/install/setup.bash
+  echo "[launch] URC ROS2 workspace sourced"
+fi
+
 # Activate venv if present
 if [ -d "venv" ]; then
   source venv/bin/activate

@@ -24,10 +24,19 @@
       <button class="tab-btn" data-tab="files">Files</button>
       <button class="tab-btn" data-tab="system">System Overview</button>
       <button class="tab-btn" data-tab="payload">Payload</button>
-      <button class="tab-btn" data-tab="arm">Arm</button>
     </nav>
   </div>
   <div class="header-right">
+    <div class="link-status" title="2.4 GHz radio link">
+      <span class="status-dot dot-yellow" id="link24Dot"></span>
+      <span>2.4G</span>
+      <strong id="link24Val">--%</strong>
+    </div>
+    <div class="link-status" title="900 MHz radio link">
+      <span class="status-dot dot-yellow" id="link900Dot"></span>
+      <span>900M</span>
+      <strong id="link900Val">--%</strong>
+    </div>
     <!-- Ground station access URL — click to copy -->
     <div class="gs-url-chip" id="gsUrlChip" title="Click to copy URL">
       <span class="gs-url-icon">⊕</span>
@@ -151,6 +160,24 @@
   </div>
 </div>
 
+<!-- 360 capture modal -->
+<div id="capture360Modal" class="modal-overlay hidden">
+  <div class="modal-box capture360-modal-box">
+    <div class="modal-header">
+      <span>360 Image Capture</span>
+      <button class="modal-close" id="closeCapture360Modal">✕</button>
+    </div>
+    <div class="capture360-body">
+      <div class="capture360-status" id="capture360Status">Ready</div>
+      <div class="capture360-command mono" id="capture360Command">Command bytes: --</div>
+      <div class="capture360-image-wrap">
+        <span id="capture360Placeholder">No stitched image captured</span>
+        <img id="capture360Img" class="hidden" alt="Stitched 360 capture" />
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ══════════════════════════════════════════════════════════════════════
      MAIN CONTENT
 ════════════════════════════════════════════════════════════════════════ -->
@@ -161,7 +188,10 @@
 
     <!-- Camera grid -->
     <section class="section cameras-section">
-      <div class="section-header"><span>Camera Feeds</span></div>
+      <div class="section-header">
+        <span>Camera Feeds</span>
+        <button class="btn-secondary btn-sm" id="capture360Btn">Capture 360 Image</button>
+      </div>
       <div class="camera-grid">
         <div class="camera-cell" id="cam0">
           <div class="camera-label">FRONT</div>
@@ -198,73 +228,16 @@
       </div>
     </section>
 
-    <!-- Telemetry + GPS row -->
-    <div class="bottom-row">
+    <!-- Subsystems + GPS row -->
+    <div class="dashboard-main-row">
 
-      <!-- Telemetry -->
-      <section class="section telemetry-section">
-        <div class="section-header">
-          <span>Telemetry</span>
-          <button class="icon-btn" id="openWarningModal" title="Configure warning levels">⚙</button>
-        </div>
-        <div class="telemetry-grid">
-
-          <!-- SOC -->
-          <div class="telem-card" id="socCard">
-            <div class="telem-top">
-              <span class="telem-label">State of Charge</span>
-              <span class="telem-badge" id="socBadge">OK</span>
-            </div>
-            <div class="telem-value"><span id="socVal">—</span><span class="telem-unit">%</span></div>
-            <div class="telem-bar-bg">
-              <div class="telem-bar" id="socBar" style="width:0%"></div>
-            </div>
-            <div class="telem-thresholds">
-              <span>Warn: <span id="socWarnTh">30</span>%</span>
-              <span>Crit: <span id="socCritTh">15</span>%</span>
-            </div>
-          </div>
-
-          <!-- Current -->
-          <div class="telem-card" id="curCard">
-            <div class="telem-top">
-              <span class="telem-label">Current Draw</span>
-              <span class="telem-badge" id="curBadge">OK</span>
-            </div>
-            <div class="telem-value"><span id="curVal">—</span><span class="telem-unit">A</span></div>
-            <div class="telem-bar-bg">
-              <div class="telem-bar" id="curBar" style="width:0%"></div>
-            </div>
-            <div class="telem-thresholds">
-              <span>Warn: <span id="curWarnTh">20</span>A</span>
-              <span>Crit: <span id="curCritTh">30</span>A</span>
-            </div>
-          </div>
-
-          <!-- Temperature -->
-          <div class="telem-card" id="tempCard">
-            <div class="telem-top">
-              <span class="telem-label">Temperature</span>
-              <span class="telem-badge" id="tempBadge">OK</span>
-            </div>
-            <div class="telem-value"><span id="tempVal">—</span><span class="telem-unit">°C</span></div>
-            <div class="telem-bar-bg">
-              <div class="telem-bar" id="tempBar" style="width:0%"></div>
-            </div>
-            <div class="telem-thresholds">
-              <span>Warn: <span id="tempWarnTh">60</span>°C</span>
-              <span>Crit: <span id="tempCritTh">80</span>°C</span>
-            </div>
-          </div>
-
-          <!-- Voltage -->
-          <div class="telem-card telem-card-sm">
-            <div class="telem-label">Voltage</div>
-            <div class="telem-value-sm"><span id="voltVal">—</span><span class="telem-unit">V</span></div>
-          </div>
-
-        </div>
-      </section>
+      <!-- Subsystems -->
+      <div class="dashboard-side-stack">
+        <section class="section subsystem-overview-section">
+          <div class="section-header"><span>Rover Subsystems</span></div>
+          <div class="subsystem-overview-grid" id="subsystemOverviewGrid"></div>
+        </section>
+      </div>
 
       <!-- GPS Map -->
       <section class="section gps-section">
@@ -351,6 +324,11 @@
             <span class="sys-item-label">Arm</span>
             <span class="sys-item-val" id="sysArmVal">Connected</span>
           </div>
+          <div class="sys-status-item" id="sysDriveConn">
+            <span class="status-dot dot-green"></span>
+            <span class="sys-item-label">Drive / Chassis</span>
+            <span class="sys-item-val" id="sysDriveVal">Connected</span>
+          </div>
           <div class="sys-status-item">
             <span class="status-dot dot-green"></span>
             <span class="sys-item-label">IMU</span>
@@ -400,95 +378,63 @@
         </div>
       </section>
 
-      <!-- LED Indicators -->
+      <!-- LED / 360 Camera Arduino -->
       <section class="section sys-card led-card">
-        <div class="section-header"><span>LED Indicators</span></div>
-        <div class="led-grid" id="ledGrid">
-          <!-- injected by JS -->
-          <div class="led-item">
-            <div class="led-swatch" style="background:#ff0000;box-shadow:0 0 10px #ff0000aa"></div>
-            <div class="led-info">
-              <div class="led-label">Port Bow</div>
-              <div class="led-state">ON · R255 G0 B0</div>
-            </div>
+        <div class="section-header"><span>LED / 360 Camera Arduino</span></div>
+        <div class="led-controller-summary">
+          <div class="led-controller-row">
+            <span class="status-dot dot-yellow" id="ledArduinoDot"></span>
+            <span class="net-label">LED Arduino</span>
+            <span class="net-val" id="ledArduinoVal">Checking...</span>
           </div>
-          <div class="led-item">
-            <div class="led-swatch" style="background:#00ff00;box-shadow:0 0 10px #00ff00aa"></div>
-            <div class="led-info">
-              <div class="led-label">Starboard Bow</div>
-              <div class="led-state">ON · R0 G255 B0</div>
-            </div>
+          <div class="led-controller-row">
+            <span class="status-dot dot-yellow" id="ledArduinoPubDot"></span>
+            <span class="net-label">Publisher</span>
+            <span class="net-val" id="ledArduinoPubVal">Checking...</span>
           </div>
-          <div class="led-item">
-            <div class="led-swatch" style="background:#333;box-shadow:none"></div>
-            <div class="led-info">
-              <div class="led-label">Port Stern</div>
-              <div class="led-state led-off">OFF · R0 G0 B255</div>
-            </div>
+          <div class="led-controller-row">
+            <span class="status-dot dot-yellow" id="ledArduinoSubDot"></span>
+            <span class="net-label">Subscriber</span>
+            <span class="net-val" id="ledArduinoSubVal">Checking...</span>
           </div>
-          <div class="led-item">
-            <div class="led-swatch" style="background:#ffffff;box-shadow:0 0 10px #ffffffaa"></div>
-            <div class="led-info">
-              <div class="led-label">Star. Stern</div>
-              <div class="led-state">ON · R255 G255 B255</div>
-            </div>
+          <div class="led-controller-row">
+            <span class="status-dot dot-yellow" id="camera360Dot"></span>
+            <span class="net-label">360 Camera</span>
+            <span class="net-val" id="camera360Val">Checking...</span>
+          </div>
+          <div class="led-controller-row">
+            <span class="net-label">360 Mode</span>
+            <span class="net-val mono" id="camera360Mode">--</span>
           </div>
         </div>
+        <div class="led-grid" id="ledGrid"></div>
       </section>
 
-      <!-- Power Distribution -->
+      <!-- Drive Motors -->
       <section class="section sys-card">
-        <div class="section-header"><span>Power Distribution</span></div>
-        <div class="power-table">
-          <div class="power-row power-header">
-            <span>Rail</span><span>Voltage</span><span>Current</span><span>Status</span>
-          </div>
-          <div class="power-row">
-            <span>Drive Motors</span><span>24.1 V</span><span>4.8 A</span>
-            <span class="badge-ok">OK</span>
-          </div>
-          <div class="power-row">
-            <span>Arm</span><span>24.0 V</span><span>1.2 A</span>
-            <span class="badge-ok">OK</span>
-          </div>
-          <div class="power-row">
-            <span>Payload</span><span>12.0 V</span><span>2.1 A</span>
-            <span class="badge-ok">OK</span>
-          </div>
-          <div class="power-row">
-            <span>Jetson 5V</span><span>5.0 V</span><span>3.5 A</span>
-            <span class="badge-ok">OK</span>
-          </div>
-          <div class="power-row">
-            <span>Comms/Radio</span><span>5.0 V</span><span>0.4 A</span>
-            <span class="badge-ok">OK</span>
-          </div>
+        <div class="section-header">
+          <span>Drive Motors</span>
+          <button class="btn-secondary btn-sm clear-faults-btn" data-group="drive" data-device-id="0">Clear All</button>
         </div>
-      </section>
-
-      <!-- Drive System -->
-      <section class="section sys-card">
-        <div class="section-header"><span>Drive System</span></div>
-        <div class="drive-table">
+        <div class="drive-table motor-table" id="driveMotorTable">
           <div class="drive-row drive-header">
-            <span>Motor</span><span>Temp</span><span>RPM</span><span>Status</span>
+            <span>Motor</span><span>Temp</span><span>Amps</span><span>Volts</span><span>Faults</span><span></span>
           </div>
-          <div class="drive-row">
-            <span>FL</span><span>41.2 °C</span><span>312</span>
-            <span class="badge-ok">OK</span>
+          <div class="motor-empty">Waiting for drive motor telemetry</div>
+        </div>
+      </section>
+
+      <!-- Arm Motors -->
+      <section class="section sys-card">
+        <div class="section-header">
+          <span>Arm Motors</span>
+          <button class="btn-secondary btn-sm clear-faults-btn" data-group="arm" data-device-id="0">Clear All</button>
+        </div>
+        <div class="drive-table motor-table" id="armMotorTable">
+          <div class="drive-row drive-header">
+            <span>Motor</span><span>Temp</span><span>Amps</span><span>Volts</span><span>Faults</span><span></span>
           </div>
-          <div class="drive-row">
-            <span>FR</span><span>39.8 °C</span><span>315</span>
-            <span class="badge-ok">OK</span>
-          </div>
-          <div class="drive-row">
-            <span>RL</span><span>43.1 °C</span><span>308</span>
-            <span class="badge-ok">OK</span>
-          </div>
-          <div class="drive-row">
-            <span>RR</span><span>40.5 °C</span><span>310</span>
-            <span class="badge-ok">OK</span>
-          </div>
+          <div class="motor-empty">Waiting for arm motor telemetry</div>
         </div>
       </section>
 
@@ -510,7 +456,7 @@
           </div>
           <div class="net-row">
             <span class="net-label">Radio Band</span>
-            <span class="net-val">5.8 GHz</span>
+            <span class="net-val">2.4 GHz + 900 MHz</span>
           </div>
           <div class="net-row">
             <span class="net-label">TX Rate</span>
@@ -534,15 +480,55 @@
       <span id="payloadStatusLabel">Checking…</span>
     </div>
     <div class="subsys-body" id="payloadBody">
+      <section class="section payload-status-section">
+        <div class="section-header"><span>Payload Arduino ROS Link</span></div>
+        <div class="payload-status-grid">
+          <div class="payload-status-card">
+            <span class="status-dot dot-yellow" id="payloadArduinoPubDot"></span>
+            <div>
+              <div class="payload-status-label">Arduino Publisher</div>
+              <div class="payload-status-val" id="payloadArduinoPubVal">Checking...</div>
+            </div>
+          </div>
+          <div class="payload-status-card">
+            <span class="status-dot dot-yellow" id="payloadArduinoSubDot"></span>
+            <div>
+              <div class="payload-status-label">Arduino Subscriber</div>
+              <div class="payload-status-val" id="payloadArduinoSubVal">Checking...</div>
+            </div>
+          </div>
+          <div class="payload-status-card">
+            <span class="status-dot dot-yellow" id="payloadArduinoConnDot"></span>
+            <div>
+              <div class="payload-status-label">Arduino Link</div>
+              <div class="payload-status-val" id="payloadArduinoConnVal">Checking...</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section payload-sensor-section">
+        <div class="section-header"><span>Arduino Sensor Readings</span></div>
+        <div class="payload-sensor-grid">
+          <div class="payload-sensor-card">
+            <div class="telem-label">Current Temperature</div>
+            <div class="telem-value-sm"><span id="payloadTempVal">--</span><span class="telem-unit">°C</span></div>
+          </div>
+          <div class="payload-sensor-card">
+            <div class="telem-label">Current Moisture</div>
+            <div class="telem-value-sm"><span id="payloadMoistureVal">--</span><span class="telem-unit">%</span></div>
+          </div>
+        </div>
+      </section>
 
       <!-- Elevator Steppers -->
       <section class="section ctrl-section">
-        <div class="section-header"><span>Elevator Steppers</span></div>
+        <div class="section-header"><span>Elevator Stepper</span></div>
         <div class="ctrl-body">
           <div class="ctrl-increment-row">
-            <label class="ctrl-label">Increment</label>
-            <input type="number" id="elevatorMm" class="ctrl-input" value="5" min="0.1" max="500" step="0.1" />
-            <span class="ctrl-unit">mm</span>
+            <label class="ctrl-label">Steps</label>
+            <input type="number" id="elevatorSteps" class="ctrl-input" value="100" min="1" max="100000" step="1" />
+            <span class="ctrl-unit">steps</span>
           </div>
           <div class="ctrl-arrows">
             <button class="ctrl-arrow-btn ctrl-up" id="elevatorUp">▲<br/><span>UP</span></button>
@@ -585,23 +571,42 @@
         </div>
       </section>
 
+      <section class="section byte-workspace-section">
+        <div class="section-header"><span>Stepper Byte Command Workspace</span></div>
+        <div class="byte-workspace-body">
+          <div class="byte-columns">
+            <label class="byte-field">
+              <span>Elevator byte sequence</span>
+              <textarea id="elevatorByteSequence" spellcheck="false" placeholder="Add custom elevator command bytes here, e.g. 0xAA 0x01 ..."></textarea>
+            </label>
+            <label class="byte-field">
+              <span>Carousel byte sequence</span>
+              <textarea id="carouselByteSequence" spellcheck="false" placeholder="Add custom carousel command bytes here, e.g. 0xAA 0x02 ..."></textarea>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section class="section life-analysis-section">
+        <div class="section-header"><span>Payload Life Analysis</span></div>
+        <div class="life-analysis-body">
+          <div class="life-analysis-actions">
+            <button class="btn-primary" id="startLifeAnalysisBtn">Start Analysis</button>
+            <label class="btn-secondary file-btn">
+              Load Radar Graph
+              <input type="file" id="lifeRadarFile" accept="image/*" />
+            </label>
+          </div>
+          <div class="life-analysis-status" id="lifeAnalysisStatus">Idle</div>
+          <div class="radar-output" id="radarOutput">
+            <span>No radar graph loaded</span>
+            <img id="radarGraphImg" class="hidden" alt="Payload life analysis radar graph" />
+          </div>
+        </div>
+      </section>
+
     </div><!-- /payloadBody -->
   </div><!-- /tab-payload -->
-
-
-  <!-- ── ARM ──────────────────────────────────────────────────────── -->
-  <div class="tab-content" id="tab-arm">
-    <div class="subsys-header" id="armHeader">
-      <span class="status-dot" id="armDot"></span>
-      <span id="armStatusLabel">Checking…</span>
-    </div>
-    <div class="subsys-body" id="armBody">
-      <div class="arm-placeholder">
-        <span class="arm-placeholder-icon">⚙</span>
-        <span class="arm-placeholder-text">Arm controls coming soon</span>
-      </div>
-    </div>
-  </div><!-- /tab-arm -->
 
 </main><!-- /main -->
 

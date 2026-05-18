@@ -29,16 +29,35 @@ class Config:
     battery_topic: str = "/battery/state"
     imu_topic: str = "/imu/data"
     jetson_temp_topic: str = "/jetson/temperature"
+    payload_temperature_topic: str = "/payload/arduino/temperature"
+    payload_moisture_topic: str = "/payload/arduino/moisture"
+    led_arduino_status_topic: str = "/led_arduino/status"
+    led_arduino_360_camera_topic: str = "/led_arduino/camera_360/status"
+    led_arduino_360_capture_topic: str = "/led_arduino/camera_360/capture_cmd"
 
     # ROS2 topics — subsystem status
     payload_status_topic: str = "/payload/status"
     arm_status_topic: str = "/arm/status"
+    drive_status_topic: str = "/drive/status"
+    drive_motor_telemetry_topic: str = "/drive/spark_motor_telemetry"
+    arm_motor_telemetry_topic: str = "/arm/spark_motor_telemetry"
+    drive_clear_faults_topic: str = "/drive/spark_clear_faults"
+    arm_clear_faults_topic: str = "/arm/spark_clear_faults"
+
+    # ROS2 topics — radio link health
+    link_24ghz_topic: str = "/comms/link_24ghz"
+    link_900mhz_topic: str = "/comms/link_900mhz"
 
     # ROS2 topics — control
     estop_topic: str = "/estop"
     elevator_topic: str = "/payload/elevator/cmd"
     carousel_topic: str = "/payload/carousel/cmd"
     auger_topic: str = "/payload/auger/cmd"
+
+    # Command reliability. Commands are intentionally published more than once
+    # because the rover link can be lossy and these messages are operator intent.
+    command_publish_redundancy: int = 3
+    command_publish_spacing_s: float = 0.025
 
     # Default warning levels (can be overridden per-session via API)
     soc_warning: WarningLevel = field(

@@ -98,13 +98,15 @@ html, body {
 .header-right { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 
 .controller-status,
-.api-status {
+.api-status,
+.link-status {
   display: flex; align-items: center; gap: 6px;
   padding: 4px 10px; border-radius: var(--radius);
   border: 1px solid var(--border);
   font-size: 11px; color: var(--text-dim);
   white-space: nowrap;
 }
+.link-status strong { color: var(--text); font-family: var(--mono); font-size: 11px; }
 
 /* E-STOP */
 .estop-btn {
@@ -164,11 +166,12 @@ html, body {
   display: none;
   flex-direction: column;
   gap: 12px;
+  min-height: 0;
 }
 #tab-dashboard.active { display: flex; }
 
 /* Camera grid */
-.cameras-section { flex-shrink: 0; }
+.cameras-section { flex: 0 0 auto; }
 
 .camera-grid {
   display: grid;
@@ -207,17 +210,55 @@ html, body {
 }
 .cam-err-icon { font-size: 28px; color: var(--red); }
 
-/* Bottom row */
-.bottom-row {
+/* Subsystem overview */
+.subsystem-overview-section { flex: 0 0 auto; }
+.subsystem-overview-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 8px;
+}
+.subsystem-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.subsystem-card.degraded { border-color: rgba(245,158,11,0.45); }
+.subsystem-card.critical { border-color: rgba(239,68,68,0.55); }
+.subsystem-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.subsystem-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.subsystem-title strong { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.subsystem-state { font-size: 10px; font-weight: 800; letter-spacing: 0.06em; color: var(--green); }
+.subsystem-card.degraded .subsystem-state { color: var(--yellow); }
+.subsystem-card.critical .subsystem-state { color: var(--red); }
+.subsystem-summary { display: none; }
+.subsystem-metrics { display: grid; grid-template-columns: 1fr; gap: 4px; }
+.subsystem-metric { min-width: 0; }
+.subsystem-metric span { display: block; color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; }
+.subsystem-metric strong { display: block; font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Main dashboard row */
+.dashboard-main-row {
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) minmax(480px, 1fr);
   gap: 12px;
   flex: 1;
   min-height: 0;
 }
+.dashboard-side-stack {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
 
 /* ── Telemetry ────────────────────────────────────────────── */
-.telemetry-section { overflow-y: auto; }
+.telemetry-section { overflow-y: auto; flex: 1; min-height: 0; }
 
 .telemetry-grid {
   display: grid;
@@ -279,7 +320,7 @@ html, body {
 /* ── GPS section ──────────────────────────────────────────── */
 .gps-section { display: flex; flex-direction: column; }
 
-#gpsMap { flex: 1; min-height: 160px; background: #0a1525; }
+#gpsMap { flex: 1; min-height: 360px; background: #0a1525; }
 
 .gps-fix-badge {
   font-size: 10px; font-weight: 700; padding: 2px 8px;
@@ -412,6 +453,23 @@ html, body {
 .compute-val   { font-family: var(--mono); font-size: 18px; color: var(--text); }
 
 /* LEDs */
+.led-controller-summary {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.led-controller-row {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.led-controller-row:last-child {
+  border-bottom: none;
+  grid-template-columns: 1fr auto;
+}
 .led-grid { display: flex; flex-direction: column; gap: 0; padding: 4px 0; }
 .led-item {
   display: flex; align-items: center; gap: 14px;
@@ -426,6 +484,7 @@ html, body {
 .led-label  { font-size: 12px; font-weight: 600; }
 .led-state  { font-size: 10px; color: var(--text-dim); font-family: var(--mono); }
 .led-off    { color: var(--text-muted); }
+.led-empty  { padding: 12px 14px; color: var(--text-muted); font-size: 12px; }
 
 /* Power table */
 .power-table, .drive-table { font-size: 12px; }
@@ -434,6 +493,23 @@ html, body {
   padding: 8px 14px;
   border-bottom: 1px solid var(--border);
   align-items: center;
+}
+.motor-table .drive-row {
+  grid-template-columns: minmax(120px, 1.2fr) 70px 70px 70px minmax(70px, 90px) 64px;
+  gap: 8px;
+}
+.motor-row.offline { color: var(--text-muted); }
+.motor-row em {
+  color: var(--text-muted);
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.motor-empty {
+  padding: 12px 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
 }
 .power-row:last-child, .drive-row:last-child { border-bottom: none; }
 .power-header, .drive-header {
@@ -460,12 +536,12 @@ html, body {
 .net-val.mono { font-family: var(--mono); font-size: 11px; }
 
 /* ══════════════════════════════════════════════════════════
-   PAYLOAD / ARM TABS — subsystem connection header
+   PAYLOAD TAB — subsystem connection header
 ══════════════════════════════════════════════════════════ */
-#tab-payload, #tab-arm {
+#tab-payload {
   display: none; flex-direction: column; gap: 12px;
 }
-#tab-payload.active, #tab-arm.active { display: flex; }
+#tab-payload.active { display: flex; }
 
 .subsys-header {
   display: flex; align-items: center; gap: 10px;
@@ -484,6 +560,38 @@ html, body {
 .ctrl-section { }
 
 .ctrl-body { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+
+.payload-status-grid,
+.payload-sensor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  padding: 12px;
+}
+.payload-sensor-grid { grid-template-columns: repeat(2, 1fr); }
+.payload-status-card,
+.payload-sensor-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+.payload-status-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.payload-status-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.payload-status-val {
+  font-size: 13px;
+  font-weight: 700;
+}
 
 .ctrl-increment-row { display: flex; align-items: center; gap: 10px; }
 
@@ -558,13 +666,78 @@ html, body {
 }
 .auger-toggle:hover { border-color: var(--accent-dim); }
 
-/* Arm placeholder */
-.arm-placeholder {
-  flex: 1; display: flex; flex-direction: column; align-items: center;
-  justify-content: center; gap: 12px; color: var(--text-muted); padding: 60px;
+/* Payload byte workspace / life analysis */
+.byte-workspace-body,
+.life-analysis-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
-.arm-placeholder-icon { font-size: 48px; }
-.arm-placeholder-text { font-size: 14px; }
+.byte-columns {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+.byte-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.byte-field span {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.byte-field textarea {
+  min-height: 110px;
+  resize: vertical;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  outline: none;
+}
+.byte-field textarea:focus { border-color: var(--accent-dim); }
+.life-analysis-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.file-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.file-btn input { display: none; }
+.life-analysis-status {
+  min-height: 18px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.radar-output {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg2);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  overflow: hidden;
+}
+.radar-output img {
+  max-width: 100%;
+  max-height: 420px;
+  display: block;
+}
 
 /* ══════════════════════════════════════════════════════════
    BUTTONS
@@ -587,6 +760,7 @@ html, body {
 }
 .btn-secondary:hover  { color: var(--text); border-color: rgba(255,255,255,0.2); }
 .btn-secondary.btn-sm { padding: 3px 9px; font-size: 11px; }
+.btn-secondary:disabled { opacity: 0.5; cursor: wait; }
 
 .icon-btn {
   background: none; border: 1px solid var(--border);
@@ -719,6 +893,45 @@ html, body {
   display: flex; justify-content: flex-end; gap: 8px;
   padding: 12px 18px;
   border-top: 1px solid var(--border);
+}
+
+.capture360-modal-box {
+  width: min(1080px, calc(100vw - 40px));
+}
+.capture360-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.capture360-status {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.capture360-command {
+  color: var(--accent);
+  background: rgba(0,212,170,0.06);
+  border: 1px solid rgba(0,212,170,0.15);
+  border-radius: var(--radius);
+  padding: 7px 10px;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.capture360-image-wrap {
+  min-height: 280px;
+  max-height: 62vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #020711;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: auto;
+  color: var(--text-muted);
+}
+.capture360-image-wrap img {
+  max-width: 100%;
+  display: block;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -858,4 +1071,22 @@ html, body {
   background: var(--panel2) !important;
   color: var(--text) !important;
   border-color: var(--border) !important;
+}
+
+@media (max-width: 1100px) {
+  #header { height: auto; min-height: 52px; align-items: flex-start; padding: 8px 12px; }
+  .header-left, .header-right { flex-wrap: wrap; gap: 8px; }
+  .tab-nav { flex-wrap: wrap; }
+  #main { top: 78px; }
+  .camera-grid, .subsystem-overview-grid, .system-grid { grid-template-columns: repeat(2, 1fr); }
+  .payload-status-grid { grid-template-columns: repeat(2, 1fr); }
+  .dashboard-main-row { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 720px) {
+  html, body { overflow: auto; }
+  #header, #main { position: static; }
+  .header-left, .header-right { width: 100%; }
+  .camera-grid, .subsystem-overview-grid, .telemetry-grid, .system-grid,
+  .payload-status-grid, .payload-sensor-grid, .byte-columns { grid-template-columns: 1fr; }
 }

@@ -22,6 +22,7 @@ const state = {
   logWarns:  0,
   logFilter: '',
   logLevel:  'ALL',
+  alertLogKeys: new Map(),
   gsUrl: '',
 };
 
@@ -53,6 +54,9 @@ function withToken(url) {
 // ══════════════════════════════════════════════════════════════
 
 const TOAST_ICONS = { error: '⊗', warn: '⚠', info: 'ℹ', success: '✓' };
+const IMPORTANT_LOG_SOURCES = new Set([
+  'ros2', 'bridge', 'rclpy', 'estop', 'can', 'drive', 'arm', 'payload', 'comms', 'radio', 'battery'
+]);
 
 function showToast(type, title, message, duration = 5000) {
   const container = document.getElementById('toastContainer');
@@ -76,6 +80,36 @@ function dismissToast(el) {
   if (!el || !el.parentNode) return;
   el.classList.add('fade-out');
   setTimeout(() => el.remove(), 320);
+}
+
+function isImportantLog(entry) {
+  const lvl = (entry.level || '').toUpperCase();
+  const source = String(entry.source || '').toLowerCase();
+  const msg = String(entry.msg || '').toLowerCase();
+  if (lvl === 'ERROR') return true;
+  if (lvl !== 'WARN') return false;
+  if (IMPORTANT_LOG_SOURCES.has(source)) return true;
+  return ['ros', 'timeout', 'disconnect', 'lost', 'failed', 'fault', 'critical', 'estop', 'battery'].some(term => msg.includes(term));
+}
+
+function maybeShowImportantLogToast(entry) {
+  if (!isImportantLog(entry)) return;
+  const lvl = (entry.level || '').toUpperCase();
+  const key = `${lvl}:${entry.source || ''}:${entry.msg || ''}`;
+  const now = Date.now();
+  const last = state.alertLogKeys.get(key) || 0;
+  if (now - last < 15000) return;
+  state.alertLogKeys.set(key, now);
+  if (state.alertLogKeys.size > 200) {
+    const oldest = [...state.alertLogKeys.keys()].slice(0, 50);
+    oldest.forEach(k => state.alertLogKeys.delete(k));
+  }
+  showToast(
+    lvl === 'ERROR' ? 'error' : 'warn',
+    `ROS2 ${lvl}`,
+    `[${entry.source || 'system'}] ${entry.msg || ''}`,
+    lvl === 'ERROR' ? 0 : 10000
+  );
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -303,7 +337,13 @@ function handleTelemetryMsg(msg) {
   if (msg.type !== 'telemetry') return;
   updateTelemetry(msg.telemetry);
   updateGPS(msg.gnss);
-  updateSubsysStatus(msg.payload_connected, msg.arm_connected);
+  updateSubsysStatus(msg.payload_connected, msg.arm_connected, msg.drive_connected);
+  updateSubsystemOverview(msg.subsystems || {});
+  updateComms(msg.comms || {});
+  updatePayloadArduino(msg.payload_arduino || {});
+  updateLifeAnalysis(msg.life_analysis || {});
+  updateLedController(msg.led_controller || {});
+  updateMotorTelemetry(msg.motor_telemetry || {});
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -326,6 +366,7 @@ function applyTelemetryCard(id, barId, badgeId, value, maxVal, cls) {
   const card  = document.getElementById(id);
   const bar   = document.getElementById(barId);
   const badge = document.getElementById(badgeId);
+  if (!card || !bar || !badge) return;
   const pct   = Math.min(100, Math.max(0, (value / maxVal) * 100));
 
   bar.style.width     = pct + '%';
@@ -336,6 +377,7 @@ function applyTelemetryCard(id, barId, badgeId, value, maxVal, cls) {
 }
 
 function updateTelemetry(t) {
+  if (!document.getElementById('socVal')) return;
   const w = state.warnings;
 
   const socCls = levelClassInv(t.soc, w.soc.warning, w.soc.critical);
@@ -428,6 +470,8 @@ function initGamepadPolling() {
 function initEStop() {
   document.getElementById('estopBtn').addEventListener('click', activateEstop);
   document.getElementById('resetEstopBtn').addEventListener('click', resetEstop);
+  document.getElementById('capture360Btn').addEventListener('click', capture360Image);
+  document.getElementById('closeCapture360Modal').addEventListener('click', closeCapture360Modal);
 }
 
 async function activateEstop() {
@@ -456,6 +500,37 @@ async function resetEstop() {
     showToast('info', 'E-Stop Reset', 'System ready');
   } catch (err) {
     showToast('error', 'E-Stop Reset Error', err.message);
+  }
+}
+
+function closeCapture360Modal() {
+  document.getElementById('capture360Modal').classList.add('hidden');
+}
+
+async function capture360Image() {
+  const modal = document.getElementById('capture360Modal');
+  const status = document.getElementById('capture360Status');
+  const command = document.getElementById('capture360Command');
+  const img = document.getElementById('capture360Img');
+  const placeholder = document.getElementById('capture360Placeholder');
+  modal.classList.remove('hidden');
+  status.textContent = 'Sending servo command to LED Arduino and stitching camera frames...';
+  command.textContent = 'Command bytes: pending';
+  img.classList.add('hidden');
+  placeholder.classList.remove('hidden');
+
+  try {
+    const res = await apiFetch('/api/camera360/capture', { method: 'POST' });
+    const capture = res.capture || {};
+    const bytes = (capture.command_bytes || []).map(b => `0x${Number(b).toString(16).padStart(2, '0').toUpperCase()}`).join(' ');
+    command.textContent = `Command bytes: ${bytes || '--'}`;
+    img.src = capture.image_data_url || '';
+    img.classList.toggle('hidden', !capture.image_data_url);
+    placeholder.classList.toggle('hidden', !!capture.image_data_url);
+    status.textContent = `Captured ${capture.source_frames || 0} frames and stitched on Jetson`;
+  } catch (err) {
+    status.textContent = `Capture failed: ${err.message}`;
+    showToast('error', '360 Capture Failed', err.message);
   }
 }
 
@@ -508,14 +583,14 @@ function initWarningModal() {
   renderThresholdLabels();
   syncWarningsToServer().catch(() => {});
 
-  document.getElementById('openWarningModal').addEventListener('click', () => {
+  document.getElementById('openWarningModal')?.addEventListener('click', () => {
     populateWarningModal();
-    document.getElementById('warningModal').classList.remove('hidden');
+    document.getElementById('warningModal')?.classList.remove('hidden');
   });
-  document.getElementById('closeWarningModal').addEventListener('click',  closeWarningModal);
-  document.getElementById('cancelWarningModal').addEventListener('click', closeWarningModal);
+  document.getElementById('closeWarningModal')?.addEventListener('click',  closeWarningModal);
+  document.getElementById('cancelWarningModal')?.addEventListener('click', closeWarningModal);
 
-  document.getElementById('saveWarningModal').addEventListener('click', async () => {
+  document.getElementById('saveWarningModal')?.addEventListener('click', async () => {
     const w = {
       soc:  { warning: +document.getElementById('wcSocWarn').value,  critical: +document.getElementById('wcSocCrit').value  },
       cur:  { warning: +document.getElementById('wcCurWarn').value,  critical: +document.getElementById('wcCurCrit').value  },
@@ -545,17 +620,21 @@ function populateWarningModal() {
 }
 
 function closeWarningModal() {
-  document.getElementById('warningModal').classList.add('hidden');
+  document.getElementById('warningModal')?.classList.add('hidden');
 }
 
 function renderThresholdLabels() {
   const w = state.warnings;
-  document.getElementById('socWarnTh').textContent  = w.soc.warning;
-  document.getElementById('socCritTh').textContent  = w.soc.critical;
-  document.getElementById('curWarnTh').textContent  = w.cur.warning;
-  document.getElementById('curCritTh').textContent  = w.cur.critical;
-  document.getElementById('tempWarnTh').textContent = w.temp.warning;
-  document.getElementById('tempCritTh').textContent = w.temp.critical;
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  };
+  setText('socWarnTh', w.soc.warning);
+  setText('socCritTh', w.soc.critical);
+  setText('curWarnTh', w.cur.warning);
+  setText('curCritTh', w.cur.critical);
+  setText('tempWarnTh', w.temp.warning);
+  setText('tempCritTh', w.temp.critical);
 }
 
 async function syncWarningsToServer() {
@@ -610,6 +689,7 @@ function appendLogEntries(entries) {
     const lvl = (entry.level || '').toUpperCase();
     if (lvl === 'ERROR') state.logErrors++;
     if (lvl === 'WARN')  state.logWarns++;
+    maybeShowImportantLogToast(entry);
 
     const el = document.createElement('div');
     el.className = `log-entry log-${lvl.toLowerCase()}`;
@@ -720,7 +800,7 @@ function initFiles() {
 // SYSTEM OVERVIEW
 // ══════════════════════════════════════════════════════════════
 
-function updateSubsysStatus(payloadConn, armConn) {
+function updateSubsysStatus(payloadConn, armConn, driveConn) {
   const pd = document.querySelector('#sysPayloadConn .status-dot');
   if (pd) {
     pd.className = `status-dot ${payloadConn ? 'dot-green' : 'dot-red'}`;
@@ -733,12 +813,14 @@ function updateSubsysStatus(payloadConn, armConn) {
   }
 
   updateSubsysHeader('payload', payloadConn);
-  updateSubsysHeader('arm', armConn);
 
   const pb = document.getElementById('payloadBody');
   if (pb) pb.classList.toggle('greyed', !payloadConn);
-  const ab = document.getElementById('armBody');
-  if (ab) ab.classList.toggle('greyed', !armConn);
+  const dd = document.querySelector('#sysDriveConn .status-dot');
+  if (dd) {
+    dd.className = `status-dot ${driveConn ? 'dot-green' : 'dot-red'}`;
+    document.getElementById('sysDriveVal').textContent = driveConn ? 'Connected' : 'Disconnected';
+  }
 }
 
 function updateSubsysHeader(name, connected) {
@@ -759,9 +841,214 @@ async function refreshSystemData() {
     document.getElementById('sysRam').textContent = `${d.ram_used_gb} / ${d.ram_total_gb} GB`;
     document.getElementById('sysRamBar').style.width  = `${Math.round((d.ram_used_gb / d.ram_total_gb) * 100)}%`;
     document.getElementById('sysUptime').textContent = fmtUptime(d.uptime_s);
+    updateSubsystemOverview(d.subsystems || {});
+    updateComms(d.comms || {});
+    updatePayloadArduino(d.payload_arduino || {});
+    updateLifeAnalysis(d.life_analysis || {});
+    updateLedController(d.led_controller || {});
+    updateMotorTelemetry(d.motor_telemetry || {});
   } catch (_) {
     // Non-blocking
   }
+}
+
+function setStatusDot(dotId, value) {
+  const dot = document.getElementById(dotId);
+  if (dot) dot.className = `status-dot ${value ? 'dot-green' : 'dot-red'}`;
+}
+
+function updatePayloadArduino(a) {
+  setStatusDot('payloadArduinoPubDot', !!a.publisher_active);
+  setStatusDot('payloadArduinoSubDot', !!a.subscriber_active);
+  setStatusDot('payloadArduinoConnDot', !!a.connected);
+  const pubVal = document.getElementById('payloadArduinoPubVal');
+  const subVal = document.getElementById('payloadArduinoSubVal');
+  const connVal = document.getElementById('payloadArduinoConnVal');
+  if (pubVal) pubVal.textContent = a.publisher_active ? 'Active' : 'Not detected';
+  if (subVal) subVal.textContent = a.subscriber_active ? 'Active' : 'Not detected';
+  if (connVal) connVal.textContent = a.connected ? 'Connected' : 'Disconnected';
+  if (Number.isFinite(a.temperature_c)) document.getElementById('payloadTempVal').textContent = a.temperature_c.toFixed(1);
+  if (Number.isFinite(a.moisture_pct)) document.getElementById('payloadMoistureVal').textContent = a.moisture_pct.toFixed(1);
+}
+
+function updateLifeAnalysis(life) {
+  const status = document.getElementById('lifeAnalysisStatus');
+  if (!status) return;
+  status.textContent = life.running ? 'Running analysis...' : life.radar ? 'Radar output loaded' : 'Idle';
+  if (life.radar?.image_data_url) {
+    renderRadarGraph(life.radar.image_data_url);
+  }
+}
+
+function renderRadarGraph(dataUrl) {
+  const output = document.getElementById('radarOutput');
+  const img = document.getElementById('radarGraphImg');
+  if (!output || !img) return;
+  output.querySelector('span')?.classList.add('hidden');
+  img.src = dataUrl;
+  img.classList.remove('hidden');
+}
+
+function updateLedController(c) {
+  setStatusDot('ledArduinoDot', !!c.connected);
+  setStatusDot('ledArduinoPubDot', !!c.publisher_active);
+  setStatusDot('ledArduinoSubDot', !!c.subscriber_active);
+  setStatusDot('camera360Dot', !!(c.camera_360_connected && c.camera_360_streaming));
+
+  const setText = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  };
+  setText('ledArduinoVal', c.connected ? 'Connected' : 'Disconnected');
+  setText('ledArduinoPubVal', c.publisher_active ? 'Active' : 'Not detected');
+  setText('ledArduinoSubVal', c.subscriber_active ? 'Active' : 'Not detected');
+  setText('camera360Val', c.camera_360_connected ? (c.camera_360_streaming ? 'Streaming' : 'Connected, no stream') : 'Disconnected');
+  setText('camera360Mode', c.camera_360_mode || '--');
+
+  const grid = document.getElementById('ledGrid');
+  if (!grid) return;
+  const leds = Array.isArray(c.leds) ? c.leds : [];
+  grid.innerHTML = leds.map(led => {
+    const r = Number(led.r) || 0;
+    const g = Number(led.g) || 0;
+    const b = Number(led.b) || 0;
+    const color = led.on ? `rgb(${r}, ${g}, ${b})` : '#333';
+    const shadow = led.on ? `0 0 10px rgba(${r}, ${g}, ${b}, 0.65)` : 'none';
+    return `
+      <div class="led-item">
+        <div class="led-swatch" style="background:${color};box-shadow:${shadow}"></div>
+        <div class="led-info">
+          <div class="led-label">${escHtml(led.label || `LED ${led.id ?? ''}`)}</div>
+          <div class="led-state${led.on ? '' : ' led-off'}">${led.on ? 'ON' : 'OFF'} · R${r} G${g} B${b}</div>
+        </div>
+      </div>
+    `;
+  }).join('') || '<div class="led-empty">No LED telemetry</div>';
+}
+
+function linkClass(stability) {
+  if (stability >= 70) return 'dot-green';
+  if (stability >= 45) return 'dot-yellow';
+  return 'dot-red';
+}
+
+function updateComms(comms) {
+  const link24 = comms.link_24ghz;
+  const link900 = comms.link_900mhz;
+  if (link24) {
+    document.getElementById('link24Val').textContent = `${Math.round(link24.stability)}%`;
+    document.getElementById('link24Dot').className = `status-dot ${linkClass(link24.stability)}`;
+  }
+  if (link900) {
+    document.getElementById('link900Val').textContent = `${Math.round(link900.stability)}%`;
+    document.getElementById('link900Dot').className = `status-dot ${linkClass(link900.stability)}`;
+  }
+}
+
+function updateSubsystemOverview(subsystems) {
+  const grid = document.getElementById('subsystemOverviewGrid');
+  if (!grid) return;
+  const order = ['payload', 'arm', 'drive'];
+  grid.innerHTML = order.map(key => {
+    const s = subsystems[key] || {};
+    const connected = s.connected !== false;
+    const status = connected ? (s.status || 'nominal') : 'critical';
+    const dot = connected ? (status === 'nominal' ? 'dot-green' : status === 'degraded' ? 'dot-yellow' : 'dot-red') : 'dot-red';
+    const metrics = (s.metrics || []).slice(0, 3).map(m => `
+      <div class="subsystem-metric">
+        <span>${escHtml(m.label || '')}</span>
+        <strong>${escHtml(m.value || '--')}</strong>
+      </div>
+    `).join('');
+    return `
+      <article class="subsystem-card ${escHtml(status)}">
+        <div class="subsystem-card-head">
+          <div class="subsystem-title">
+            <span class="status-dot ${dot}"></span>
+            <strong>${escHtml(s.label || key)}</strong>
+          </div>
+          <span class="subsystem-state">${connected ? escHtml(status).toUpperCase() : 'OFFLINE'}</span>
+        </div>
+        <div class="subsystem-summary">${escHtml(s.summary || '')}</div>
+        <div class="subsystem-metrics">${metrics}</div>
+      </article>
+    `;
+  }).join('');
+}
+
+function motorStatus(motor) {
+  if (!motor.connected) return { cls: 'badge-error', label: 'OFFLINE' };
+  if ((motor.faults || 0) || (motor.sticky_faults || 0)) return { cls: 'badge-error', label: 'FAULT' };
+  return { cls: 'badge-ok', label: 'OK' };
+}
+
+function formatFaultSummary(motor) {
+  const active = motor.fault_names || [];
+  const sticky = motor.sticky_fault_names || [];
+  const parts = [];
+  if (active.length) parts.push(active.join(', '));
+  if (sticky.length) parts.push(`sticky: ${sticky.join(', ')}`);
+  if (!parts.length) return 'None';
+  return parts.join(' | ');
+}
+
+function updateMotorTelemetry(motorTelemetry) {
+  renderMotorTable('drive', motorTelemetry.drive || {});
+  renderMotorTable('arm', motorTelemetry.arm || {});
+}
+
+function renderMotorTable(group, motorsById) {
+  const table = document.getElementById(`${group}MotorTable`);
+  if (!table) return;
+  const motors = Object.values(motorsById).sort((a, b) => Number(a.device_id) - Number(b.device_id));
+  const header = `
+    <div class="drive-row drive-header">
+      <span>Motor</span><span>Temp</span><span>Amps</span><span>Volts</span><span>Faults</span><span></span>
+    </div>
+  `;
+  if (!motors.length) {
+    table.innerHTML = `${header}<div class="motor-empty">Waiting for ${group} motor telemetry</div>`;
+    return;
+  }
+  const rows = motors.map(motor => {
+    const status = motorStatus(motor);
+    const faults = formatFaultSummary(motor);
+    const id = Number(motor.device_id) || 0;
+    const rawFaults = `F 0x${Number(motor.faults || 0).toString(16).padStart(4, '0')} / S 0x${Number(motor.sticky_faults || 0).toString(16).padStart(4, '0')}`;
+    return `
+      <div class="drive-row motor-row ${motor.connected ? '' : 'offline'}">
+        <span title="${escHtml(rawFaults)}">${escHtml(motor.name || `id ${id}`)} <em>#${id}</em></span>
+        <span>${Number(motor.motor_temperature_c || 0).toFixed(1)} °C</span>
+        <span>${Number(motor.motor_current_a || 0).toFixed(1)} A</span>
+        <span>${Number(motor.bus_voltage_v || 0).toFixed(1)} V</span>
+        <span class="${status.cls}" title="${escHtml(faults)}">${status.label}</span>
+        <button class="btn-secondary btn-sm clear-faults-btn" data-group="${escHtml(group)}" data-device-id="${id}">Clear</button>
+      </div>
+    `;
+  }).join('');
+  table.innerHTML = header + rows;
+}
+
+function initMotorControls() {
+  document.addEventListener('click', async e => {
+    const btn = e.target.closest('.clear-faults-btn');
+    if (!btn) return;
+    const group = btn.dataset.group;
+    const deviceId = Number(btn.dataset.deviceId || 0);
+    btn.disabled = true;
+    try {
+      await apiFetch('/api/motors/clear_faults', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group, device_id: deviceId }),
+      });
+      showToast('success', 'Clear Faults Sent', `${group} motor ${deviceId || 'all'}`);
+    } catch (err) {
+      showToast('error', 'Clear Faults Failed', err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -785,19 +1072,22 @@ function initPayloadControls() {
     document.getElementById('augerToggleLabel').textContent = state.augerOn ? 'ON' : 'OFF';
     sendAuger();
   });
+
+  document.getElementById('startLifeAnalysisBtn').addEventListener('click', startLifeAnalysis);
+  document.getElementById('lifeRadarFile').addEventListener('change', handleRadarFile);
 }
 
 async function sendElevator(direction) {
-  const mm = parseFloat(document.getElementById('elevatorMm').value);
-  if (isNaN(mm) || mm <= 0) { showToast('warn', 'Elevator', 'Enter a valid mm value'); return; }
+  const steps = parseInt(document.getElementById('elevatorSteps').value, 10);
+  if (isNaN(steps) || steps <= 0) { showToast('warn', 'Elevator', 'Enter a valid step count'); return; }
   const fb = document.getElementById('elevatorFeedback');
-  fb.textContent = `Sending ${direction.toUpperCase()} ${mm} mm…`;
+  fb.textContent = `Sending ${direction.toUpperCase()} ${steps} steps...`;
   try {
     await apiFetch('/api/payload/elevator', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ direction, mm }),
+      body: JSON.stringify({ direction, steps }),
     });
-    fb.textContent = `✓ ${direction.toUpperCase()} ${mm} mm sent`;
+    fb.textContent = `✓ ${direction.toUpperCase()} ${steps} steps sent`;
   } catch (err) {
     fb.textContent = `⊗ ${err.message}`;
     showToast('error', 'Elevator Command Failed', err.message);
@@ -842,6 +1132,40 @@ async function sendAuger() {
   }
 }
 
+async function startLifeAnalysis() {
+  const status = document.getElementById('lifeAnalysisStatus');
+  status.textContent = 'Starting analysis...';
+  try {
+    const res = await apiFetch('/api/payload/life-analysis/start', { method: 'POST' });
+    updateLifeAnalysis(res.life_analysis || {});
+    showToast('info', 'Life Analysis', 'Start signal sent');
+  } catch (err) {
+    status.textContent = `Error: ${err.message}`;
+    showToast('error', 'Life Analysis Failed', err.message);
+  }
+}
+
+function handleRadarFile(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const image_data_url = String(reader.result || '');
+    renderRadarGraph(image_data_url);
+    document.getElementById('lifeAnalysisStatus').textContent = `Loaded ${file.name}`;
+    try {
+      await apiFetch('/api/payload/life-analysis/radar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_data_url, summary: file.name }),
+      });
+    } catch (err) {
+      showToast('warn', 'Radar Save Failed', err.message);
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
 // ══════════════════════════════════════════════════════════════
 // BOOT — called after successful authentication
 // ══════════════════════════════════════════════════════════════
@@ -856,6 +1180,7 @@ function bootApp() {
   initLogs();
   initFiles();
   initPayloadControls();
+  initMotorControls();
 
   connectTelemetryWS();
   connectLogWS();

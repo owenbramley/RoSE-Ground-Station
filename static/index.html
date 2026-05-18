@@ -362,18 +362,13 @@
             <div class="telem-bar-bg"><div class="telem-bar" id="sysJetsonTempBar" style="width:0%"></div></div>
           </div>
           <div class="compute-item">
-            <div class="compute-label">CPU Usage</div>
-            <div class="compute-val" id="sysCpuPct">--</div>
-            <div class="telem-bar-bg"><div class="telem-bar" id="sysCpuBar" style="width:0%"></div></div>
+            <div class="compute-label">GPU Temperature</div>
+            <div class="compute-val" id="sysJetsonGpuTemp">--</div>
+            <div class="telem-bar-bg"><div class="telem-bar" id="sysJetsonGpuTempBar" style="width:0%"></div></div>
           </div>
           <div class="compute-item">
-            <div class="compute-label">Memory</div>
-            <div class="compute-val" id="sysRam">--</div>
-            <div class="telem-bar-bg"><div class="telem-bar" id="sysRamBar" style="width:0%"></div></div>
-          </div>
-          <div class="compute-item">
-            <div class="compute-label">Uptime</div>
-            <div class="compute-val" id="sysUptime">—</div>
+            <div class="compute-label">Current IP</div>
+            <div class="compute-val mono" id="sysCurrentIp">--</div>
           </div>
         </div>
       </section>
@@ -444,7 +439,7 @@
         <div class="net-items">
           <div class="net-row">
             <span class="net-label">Ground Station IP</span>
-            <span class="net-val mono">192.168.10.1</span>
+            <span class="net-val mono" id="netGroundStationIp">--</span>
           </div>
           <div class="net-row">
             <span class="net-label">Rover IP</span>

@@ -157,14 +157,6 @@ function fmtTime(isoStr) {
   catch (_) { return isoStr; }
 }
 
-function fmtUptime(s) {
-  if (!Number.isFinite(Number(s))) return '--';
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
-}
-
 function asFiniteNumber(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -862,15 +854,15 @@ async function refreshSystemData() {
   try {
     const d = await apiFetch('/api/system');
     const jetsonTemp = d.jetson_cpu_temp ?? d.jetson_temp;
+    const jetsonGpuTemp = d.jetson_gpu_temp;
+    const currentIp = d.current_ip || d.ips?.[0] || '--';
     document.getElementById('sysJetsonTemp').textContent = fmtNumber(jetsonTemp, 1, ' °C');
     setBarWidth('sysJetsonTempBar', jetsonTemp, 100);
-    document.getElementById('sysCpuPct').textContent = fmtNumber(d.cpu_percent, 1, ' %');
-    setBarWidth('sysCpuBar', d.cpu_percent, 100);
-    const ramUsed = asFiniteNumber(d.ram_used_gb);
-    const ramTotal = asFiniteNumber(d.ram_total_gb);
-    document.getElementById('sysRam').textContent = ramUsed === null || ramTotal === null ? '--' : `${ramUsed.toFixed(1)} / ${ramTotal.toFixed(1)} GB`;
-    setBarWidth('sysRamBar', ramUsed, ramTotal || 100);
-    document.getElementById('sysUptime').textContent = fmtUptime(d.uptime_s);
+    document.getElementById('sysJetsonGpuTemp').textContent = fmtNumber(jetsonGpuTemp, 1, ' °C');
+    setBarWidth('sysJetsonGpuTempBar', jetsonGpuTemp, 100);
+    document.getElementById('sysCurrentIp').textContent = currentIp;
+    const netIp = document.getElementById('netGroundStationIp');
+    if (netIp) netIp.textContent = currentIp;
     updateSubsystemOverview(d.subsystems || {});
     updateComms(d.comms || {});
     updatePayloadArduino(d.payload_arduino || {});

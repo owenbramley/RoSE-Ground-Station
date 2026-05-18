@@ -15,11 +15,13 @@
 <header id="header">
   <div class="header-left">
     <div class="logo">
+      <img class="logo-img" src="logo.svg" alt="RoSE logo" onerror="this.classList.add('hidden')" />
       <span class="logo-icon">◈</span>
       <span class="logo-text">RoSE Ground Station</span>
     </div>
     <nav class="tab-nav" id="tabNav">
       <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+      <button class="tab-btn" data-tab="cameras">Cameras</button>
       <button class="tab-btn" data-tab="logs">Logs</button>
       <button class="tab-btn" data-tab="files">Files</button>
       <button class="tab-btn" data-tab="system">System Overview</button>
@@ -51,10 +53,6 @@
       <span class="status-dot dot-yellow" id="apiDot"></span>
       <span id="apiLabel">Connecting…</span>
     </div>
-    <button class="estop-btn" id="estopBtn">
-      <span class="estop-icon">⚠</span>
-      E-STOP
-    </button>
   </div>
 </header>
 
@@ -185,49 +183,6 @@
 
   <!-- ── DASHBOARD ────────────────────────────────────────────────── -->
   <div class="tab-content active" id="tab-dashboard">
-
-    <!-- Camera grid -->
-    <section class="section cameras-section">
-      <div class="section-header">
-        <span>Camera Feeds</span>
-        <button class="btn-secondary btn-sm" id="capture360Btn">Capture 360 Image</button>
-      </div>
-      <div class="camera-grid">
-        <div class="camera-cell" id="cam0">
-          <div class="camera-label">FRONT</div>
-          <img class="camera-img" id="camImg0" src="/api/camera/0" alt="Front camera" />
-          <div class="camera-error hidden" id="camErr0">
-            <span class="cam-err-icon">⊗</span>
-            <span>Feed unavailable</span>
-          </div>
-        </div>
-        <div class="camera-cell" id="cam1">
-          <div class="camera-label">REAR</div>
-          <img class="camera-img" id="camImg1" src="/api/camera/1" alt="Rear camera" />
-          <div class="camera-error hidden" id="camErr1">
-            <span class="cam-err-icon">⊗</span>
-            <span>Feed unavailable</span>
-          </div>
-        </div>
-        <div class="camera-cell" id="cam2">
-          <div class="camera-label">LEFT</div>
-          <img class="camera-img" id="camImg2" src="/api/camera/2" alt="Left camera" />
-          <div class="camera-error hidden" id="camErr2">
-            <span class="cam-err-icon">⊗</span>
-            <span>Feed unavailable</span>
-          </div>
-        </div>
-        <div class="camera-cell" id="cam3">
-          <div class="camera-label">RIGHT</div>
-          <img class="camera-img" id="camImg3" src="/api/camera/3" alt="Right camera" />
-          <div class="camera-error hidden" id="camErr3">
-            <span class="cam-err-icon">⊗</span>
-            <span>Feed unavailable</span>
-          </div>
-        </div>
-      </div>
-    </section>
-
     <!-- Subsystems + GPS row -->
     <div class="dashboard-main-row">
 
@@ -257,6 +212,59 @@
 
     </div>
   </div><!-- /tab-dashboard -->
+
+
+  <!-- ── CAMERAS ─────────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-cameras">
+    <section class="section cameras-section camera-page-section">
+      <div class="section-header camera-page-header">
+        <span>Camera Feeds</span>
+        <div class="camera-actions">
+          <button class="btn-secondary btn-sm" id="showAllCamerasBtn">Show All</button>
+          <button class="btn-secondary btn-sm" id="capture360Btn">Capture 360 Image</button>
+        </div>
+      </div>
+      <div class="camera-grid" id="cameraGrid">
+        <div class="camera-cell" id="cam0" data-camera-id="0">
+          <div class="camera-label">FRONT</div>
+          <button class="camera-hide-btn" data-camera-id="0" title="Hide front camera">Hide</button>
+          <img class="camera-img" id="camImg0" src="/api/camera/0" alt="Front camera" />
+          <div class="camera-error hidden" id="camErr0">
+            <span class="cam-err-icon">⊗</span>
+            <span>Feed unavailable</span>
+          </div>
+        </div>
+        <div class="camera-cell" id="cam1" data-camera-id="1">
+          <div class="camera-label">REAR</div>
+          <button class="camera-hide-btn" data-camera-id="1" title="Hide rear camera">Hide</button>
+          <img class="camera-img" id="camImg1" src="/api/camera/1" alt="Rear camera" />
+          <div class="camera-error hidden" id="camErr1">
+            <span class="cam-err-icon">⊗</span>
+            <span>Feed unavailable</span>
+          </div>
+        </div>
+        <div class="camera-cell" id="cam2" data-camera-id="2">
+          <div class="camera-label">LEFT</div>
+          <button class="camera-hide-btn" data-camera-id="2" title="Hide left camera">Hide</button>
+          <img class="camera-img" id="camImg2" src="/api/camera/2" alt="Left camera" />
+          <div class="camera-error hidden" id="camErr2">
+            <span class="cam-err-icon">⊗</span>
+            <span>Feed unavailable</span>
+          </div>
+        </div>
+        <div class="camera-cell" id="cam3" data-camera-id="3">
+          <div class="camera-label">RIGHT</div>
+          <button class="camera-hide-btn" data-camera-id="3" title="Hide right camera">Hide</button>
+          <img class="camera-img" id="camImg3" src="/api/camera/3" alt="Right camera" />
+          <div class="camera-error hidden" id="camErr3">
+            <span class="cam-err-icon">⊗</span>
+            <span>Feed unavailable</span>
+          </div>
+        </div>
+      </div>
+      <div class="hidden-camera-dock" id="hiddenCameraDock" aria-label="Hidden cameras"></div>
+    </section>
+  </div><!-- /tab-cameras -->
 
 
   <!-- ── LOGS ─────────────────────────────────────────────────────── -->
@@ -330,24 +338,24 @@
             <span class="sys-item-val" id="sysDriveVal">Disconnected</span>
           </div>
           <div class="sys-status-item">
-            <span class="status-dot dot-green"></span>
+            <span class="status-dot dot-grey" id="sysImuDot"></span>
             <span class="sys-item-label">IMU</span>
-            <span class="sys-item-val">Online</span>
+            <span class="sys-item-val" id="sysImuVal">No data</span>
           </div>
           <div class="sys-status-item">
-            <span class="status-dot dot-green"></span>
+            <span class="status-dot dot-grey" id="sysGnssDot"></span>
             <span class="sys-item-label">GNSS Module</span>
-            <span class="sys-item-val">Online</span>
+            <span class="sys-item-val" id="sysGnssVal">No data</span>
           </div>
           <div class="sys-status-item">
-            <span class="status-dot dot-yellow"></span>
+            <span class="status-dot dot-grey" id="sysRadioDot"></span>
             <span class="sys-item-label">Radio Link</span>
-            <span class="sys-item-val">--</span>
+            <span class="sys-item-val" id="sysRadioVal">No data</span>
           </div>
           <div class="sys-status-item">
-            <span class="status-dot dot-green"></span>
+            <span class="status-dot dot-grey" id="sysCanDot"></span>
             <span class="sys-item-label">CAN Bus</span>
-            <span class="sys-item-val">Nominal</span>
+            <span class="sys-item-val" id="sysCanVal">No data</span>
           </div>
         </div>
       </section>
@@ -406,7 +414,7 @@
       </section>
 
       <!-- Drive Motors -->
-      <section class="section sys-card">
+      <section class="section sys-card motor-card motor-card-drive">
         <div class="section-header">
           <span>Drive Motors</span>
           <button class="btn-secondary btn-sm clear-faults-btn" data-group="drive" data-device-id="0">Clear All</button>
@@ -420,7 +428,7 @@
       </section>
 
       <!-- Arm Motors -->
-      <section class="section sys-card">
+      <section class="section sys-card motor-card motor-card-arm">
         <div class="section-header">
           <span>Arm Motors</span>
           <button class="btn-secondary btn-sm clear-faults-btn" data-group="arm" data-device-id="0">Clear All</button>

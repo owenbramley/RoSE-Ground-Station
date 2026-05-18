@@ -12,6 +12,7 @@ const TOKEN_KEY   = 'rose_token';
 const state = {
   estopActive: false,
   augerOn: false,
+  hiddenCameras: new Set(),
   warnings: {
     soc:  { warning: 30, critical: 15 },
     cur:  { warning: 20, critical: 30 },
@@ -426,12 +427,12 @@ function initMap() {
 
   const icon = L.divIcon({
     className: '',
-    html: `<div style="width:14px;height:14px;border-radius:50%;background:#00d4aa;border:2px solid #fff;box-shadow:0 0 8px #00d4aaaa"></div>`,
+    html: `<div style="width:14px;height:14px;border-radius:50%;background:#ff37a8;border:2px solid #fff;box-shadow:0 0 8px #ff37a8aa"></div>`,
     iconSize: [14, 14], iconAnchor: [7, 7],
   });
 
   _roverMarker = L.marker([43.6532, -79.3832], { icon }).addTo(_map);
-  _gpsTrail = L.polyline([], { color: '#00d4aa', weight: 2, opacity: 0.5 }).addTo(_map);
+  _gpsTrail = L.polyline([], { color: '#ff37a8', weight: 2, opacity: 0.5 }).addTo(_map);
 }
 
 function updateGPS(g) {
@@ -487,10 +488,9 @@ function initGamepadPolling() {
 // ══════════════════════════════════════════════════════════════
 
 function initEStop() {
-  document.getElementById('estopBtn').addEventListener('click', activateEstop);
-  document.getElementById('resetEstopBtn').addEventListener('click', resetEstop);
-  document.getElementById('capture360Btn').addEventListener('click', capture360Image);
-  document.getElementById('closeCapture360Modal').addEventListener('click', closeCapture360Modal);
+  document.getElementById('resetEstopBtn')?.addEventListener('click', resetEstop);
+  document.getElementById('capture360Btn')?.addEventListener('click', capture360Image);
+  document.getElementById('closeCapture360Modal')?.addEventListener('click', closeCapture360Modal);
 }
 
 async function activateEstop() {
@@ -558,6 +558,13 @@ async function capture360Image() {
 // ══════════════════════════════════════════════════════════════
 
 function initCameras() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('rose_hidden_cameras') || '[]');
+    state.hiddenCameras = new Set(saved.map(Number).filter(n => Number.isInteger(n) && n >= 0 && n < 4));
+  } catch (_) {
+    state.hiddenCameras = new Set();
+  }
+
   for (let i = 0; i < 4; i++) {
     const img = document.getElementById(`camImg${i}`);
     const err = document.getElementById(`camErr${i}`);
@@ -575,6 +582,12 @@ function initCameras() {
       err.classList.add('hidden');
     });
   }
+
+  document.querySelectorAll('.camera-hide-btn').forEach(btn => {
+    btn.addEventListener('click', () => hideCamera(Number(btn.dataset.cameraId)));
+  });
+  document.getElementById('showAllCamerasBtn')?.addEventListener('click', showAllCameras);
+  renderCameraVisibility();
 }
 
 function retryCam(id) {
@@ -583,6 +596,54 @@ function retryCam(id) {
   img.src = withToken(`/api/camera/${id}`) + `&_=${Date.now()}`;
   img.classList.remove('hidden');
   err.classList.add('hidden');
+}
+
+function cameraName(id) {
+  return ['Front', 'Rear', 'Left', 'Right'][id] || `Camera ${id}`;
+}
+
+function saveHiddenCameras() {
+  localStorage.setItem('rose_hidden_cameras', JSON.stringify([...state.hiddenCameras]));
+}
+
+function hideCamera(id) {
+  if (!Number.isInteger(id)) return;
+  state.hiddenCameras.add(id);
+  saveHiddenCameras();
+  renderCameraVisibility();
+}
+
+function showCamera(id) {
+  state.hiddenCameras.delete(id);
+  saveHiddenCameras();
+  renderCameraVisibility();
+  retryCam(id);
+}
+
+function showAllCameras() {
+  state.hiddenCameras.clear();
+  saveHiddenCameras();
+  renderCameraVisibility();
+  for (let i = 0; i < 4; i++) retryCam(i);
+}
+
+function renderCameraVisibility() {
+  for (let i = 0; i < 4; i++) {
+    const cell = document.getElementById(`cam${i}`);
+    if (cell) cell.classList.toggle('camera-hidden', state.hiddenCameras.has(i));
+  }
+  const dock = document.getElementById('hiddenCameraDock');
+  if (!dock) return;
+  const hidden = [...state.hiddenCameras].sort((a, b) => a - b);
+  dock.classList.toggle('hidden', hidden.length === 0);
+  dock.innerHTML = hidden.map(id => `
+    <button class="hidden-camera-btn" data-camera-id="${id}" title="Show ${escHtml(cameraName(id))} camera">
+      ${escHtml(cameraName(id))}
+    </button>
+  `).join('');
+  dock.querySelectorAll('.hidden-camera-btn').forEach(btn => {
+    btn.addEventListener('click', () => showCamera(Number(btn.dataset.cameraId)));
+  });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -865,6 +926,7 @@ async function refreshSystemData() {
     if (netIp) netIp.textContent = currentIp;
     updateSubsystemOverview(d.subsystems || {});
     updateComms(d.comms || {});
+    updateSystemHealth(d);
     updatePayloadArduino(d.payload_arduino || {});
     updateLifeAnalysis(d.life_analysis || {});
     updateLedController(d.led_controller || {});
@@ -872,6 +934,64 @@ async function refreshSystemData() {
   } catch (_) {
     // Non-blocking
   }
+}
+
+function setHealthStatus(dotId, valId, stateName, label) {
+  const dot = document.getElementById(dotId);
+  const val = document.getElementById(valId);
+  if (!dot || !val) return;
+  const cls = stateName === 'ok' ? 'dot-green' : stateName === 'warn' ? 'dot-yellow' : stateName === 'bad' ? 'dot-red' : 'dot-grey';
+  dot.className = `status-dot ${cls}`;
+  val.textContent = label;
+}
+
+function updateSystemHealth(d) {
+  const subsystems = d.subsystems || {};
+  if (subsystems.payload) updateSystemHealthConnection('sysPayloadConn', 'sysPayloadVal', subsystems.payload);
+  if (subsystems.arm) updateSystemHealthConnection('sysArmConn', 'sysArmVal', subsystems.arm);
+  if (subsystems.drive) updateSystemHealthConnection('sysDriveConn', 'sysDriveVal', subsystems.drive);
+
+  const imuKnown = typeof d.imu_online === 'boolean';
+  setHealthStatus('sysImuDot', 'sysImuVal', imuKnown ? (d.imu_online ? 'ok' : 'bad') : 'unknown', imuKnown ? (d.imu_online ? 'Online' : 'Offline') : 'No data');
+
+  const gnssKnown = typeof d.gnss_module_online === 'boolean';
+  setHealthStatus('sysGnssDot', 'sysGnssVal', gnssKnown ? (d.gnss_module_online ? 'ok' : 'bad') : 'unknown', gnssKnown ? (d.gnss_module_online ? 'Online' : 'Offline') : 'No data');
+
+  const comms = d.comms || {};
+  const stabilities = [comms.link_24ghz?.stability, comms.link_900mhz?.stability]
+    .map(asFiniteNumber)
+    .filter(v => v !== null);
+  const bestRadio = stabilities.length ? Math.max(...stabilities) : null;
+  const radioState = bestRadio === null ? 'unknown' : bestRadio >= 70 ? 'ok' : bestRadio >= 45 ? 'warn' : 'bad';
+  setHealthStatus('sysRadioDot', 'sysRadioVal', radioState, bestRadio === null ? 'No data' : `${Math.round(bestRadio)}% best link`);
+
+  const motors = Object.values(d.motor_telemetry?.drive || {});
+  if (!motors.length) {
+    setHealthStatus('sysCanDot', 'sysCanVal', 'unknown', 'No motor data');
+  } else {
+    const offline = motors.filter(m => !m.connected).length;
+    const activeFaults = motors.filter(m => Number(m.faults || 0) > 0).length;
+    const stickyFaults = motors.filter(m => Number(m.sticky_faults || 0) > 0).length;
+    const canState = offline || activeFaults ? 'bad' : stickyFaults ? 'warn' : 'ok';
+    const canLabel = offline
+      ? `${offline} offline`
+      : activeFaults
+        ? `${activeFaults} active faults`
+        : stickyFaults
+          ? `${stickyFaults} sticky faults`
+          : 'Nominal';
+    setHealthStatus('sysCanDot', 'sysCanVal', canState, canLabel);
+  }
+}
+
+function updateSystemHealthConnection(itemId, valId, subsystem) {
+  const dot = document.querySelector(`#${itemId} .status-dot`);
+  const val = document.getElementById(valId);
+  if (!dot || !val) return;
+  const connected = subsystem.connected === true;
+  const status = connected ? (subsystem.status || 'nominal') : 'critical';
+  dot.className = `status-dot ${connected ? (status === 'nominal' ? 'dot-green' : status === 'degraded' ? 'dot-yellow' : 'dot-red') : 'dot-red'}`;
+  val.textContent = connected ? (subsystem.summary || 'Connected') : 'Disconnected';
 }
 
 function setStatusDot(dotId, value) {

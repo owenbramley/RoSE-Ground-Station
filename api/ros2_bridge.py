@@ -276,6 +276,36 @@ class _DataStore:
             controller["leds"] = [dict(led) for led in self.led_controller.get("leds", [])]
             return controller
 
+    def get_topic_overview(self) -> dict:
+        return {
+            "mode": "live" if ROS2_AVAILABLE else "mock",
+            "publishes": [
+                {"topic": config.estop_topic, "type": "std_msgs/Bool", "purpose": "Emergency stop state"},
+                {"topic": config.elevator_topic, "type": "std_msgs/Float32", "purpose": "Payload elevator step command"},
+                {"topic": config.carousel_topic, "type": "std_msgs/Float32", "purpose": "Payload carousel step command"},
+                {"topic": config.auger_topic, "type": "std_msgs/Float32", "purpose": "Payload auger speed command"},
+                {"topic": config.led_arduino_360_capture_topic, "type": "std_msgs/UInt8MultiArray", "purpose": "360 camera servo/capture byte command"},
+            ],
+            "subscribes": [
+                *[
+                    {"topic": topic, "type": "sensor_msgs/Image", "purpose": f"{label} camera stream"}
+                    for topic, label in zip(config.camera_topics, config.camera_labels)
+                ],
+                {"topic": config.gnss_topic, "type": "sensor_msgs/NavSatFix", "purpose": "GNSS rover fix"},
+                {"topic": config.battery_topic, "type": "sensor_msgs/BatteryState", "purpose": "Battery telemetry"},
+                {"topic": config.jetson_temp_topic, "type": "std_msgs/Float32", "purpose": "Jetson temperature"},
+                {"topic": config.payload_temperature_topic, "type": "std_msgs/Float32", "purpose": "Payload Arduino temperature"},
+                {"topic": config.payload_moisture_topic, "type": "std_msgs/Float32", "purpose": "Payload Arduino moisture"},
+                {"topic": config.led_arduino_status_topic, "type": "std_msgs/Bool", "purpose": "LED Arduino online state"},
+                {"topic": config.led_arduino_360_camera_topic, "type": "std_msgs/Bool", "purpose": "360 camera online/streaming state"},
+                {"topic": config.payload_status_topic, "type": "std_msgs/Bool", "purpose": "Payload subsystem online state"},
+                {"topic": config.arm_status_topic, "type": "std_msgs/Bool", "purpose": "Arm subsystem online state"},
+                {"topic": config.drive_status_topic, "type": "std_msgs/Bool", "purpose": "Drive subsystem online state"},
+                {"topic": config.link_24ghz_topic, "type": "std_msgs/Float32", "purpose": "2.4 GHz link stability"},
+                {"topic": config.link_900mhz_topic, "type": "std_msgs/Float32", "purpose": "900 MHz link stability"},
+            ],
+        }
+
     def add_log(self, level: str, message: str, source: str = "system"):
         with self._lock:
             self._log_id_counter += 1
@@ -768,6 +798,9 @@ class ROS2Bridge:
 
     def get_led_controller(self) -> dict:
         return store.get_led_controller()
+
+    def get_topic_overview(self) -> dict:
+        return store.get_topic_overview()
 
     def get_motor_telemetry(self) -> dict:
         return store.get_motor_telemetry()

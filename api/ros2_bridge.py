@@ -94,9 +94,10 @@ try:
         from cv_bridge import CvBridge
         _CV_BRIDGE = CvBridge()
         CV_BRIDGE_AVAILABLE = True
-    except ImportError:
+    except Exception as e:
         CV_BRIDGE_AVAILABLE = False
         _CV_BRIDGE = None
+        logger.warning(f"cv_bridge unavailable; using raw Image conversion fallback: {e}")
     ROS2_AVAILABLE = True
     logger.info("ROS2 (rclpy) found — running in live mode")
 except ImportError:
@@ -382,57 +383,6 @@ class _DataStore:
 
 
 store = _DataStore()
-
-
-# ---------------------------------------------------------------------------
-# Mock data generator (used when ROS2 is unavailable)
-# ---------------------------------------------------------------------------
-
-_CAMERA_BG_COLORS = [
-    (40, 60, 100),   # Front  — blue
-    (60, 40, 40),    # Rear   — red
-    (40, 70, 50),    # Left   — green
-    (60, 40, 80),    # Right  — purple
-]
-_CAMERA_LABELS = config.camera_labels
-
-
-def _make_mock_frame(camera_id: int, frame_counter: int) -> bytes:
-    h, w = 360, 640
-    bg = np.full((h, w, 3), _CAMERA_BG_COLORS[camera_id], dtype=np.uint8)
-
-    # animated scan-line
-    line_y = int((frame_counter * 3) % h)
-    bg[max(0, line_y - 1): line_y + 1, :] = [v + 60 for v in _CAMERA_BG_COLORS[camera_id]]
-
-    # noise overlay
-    noise = np.random.randint(0, 18, (h, w, 3), dtype=np.uint8)
-    bg = cv2.add(bg, noise)
-
-    # label
-    label = _CAMERA_LABELS[camera_id]
-    cv2.putText(bg, f"CAM {camera_id} — {label}", (12, 34),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
-    cv2.putText(bg, datetime.now().strftime("%H:%M:%S.%f")[:-3],
-                (12, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1)
-    cv2.putText(bg, "MOCK", (w - 80, h - 12),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (60, 60, 200), 1)
-
-    ok, buf = cv2.imencode(".jpg", bg, [cv2.IMWRITE_JPEG_QUALITY, config.jpeg_quality])
-    return buf.tobytes() if ok else b""
-
-
-def _mock_camera_loop():
-    """Generate synthetic camera frames only when explicitly requested."""
-    frame_ctr = 0
-    store.add_log("WARN", "GS_CAMERA_SOURCE=mock; showing synthetic camera feeds only", "camera")
-
-    while True:
-        for cam_id in range(4):
-            frame = _make_mock_frame(cam_id, frame_ctr)
-            store.set_camera_frame(cam_id, frame)
-        frame_ctr += 1
-        time.sleep(1.0 / config.camera_fps)
 
 
 # ---------------------------------------------------------------------------
@@ -776,8 +726,8 @@ class ROS2Bridge:
         self._node: Optional["_RoverNode"] = None  # type: ignore[name-defined]
         if config.camera_source == "udp":
             _start_udp_camera_receivers()
-        elif config.camera_source == "mock":
-            threading.Thread(target=_mock_camera_loop, daemon=True).start()
+        elif config.camera_source not in ("ros2", "udp"):
+            store.add_log("ERROR", f"Unknown GS_CAMERA_SOURCE={config.camera_source!r}; expected 'udp' or 'ros2'", "camera")
         if ROS2_AVAILABLE:
             self._init_ros2()
         else:

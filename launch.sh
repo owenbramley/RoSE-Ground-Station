@@ -13,7 +13,7 @@ elif [ -f "/opt/ros/iron/setup.bash" ]; then
   source /opt/ros/iron/setup.bash
   echo "[launch] ROS2 Iron sourced"
 else
-  echo "[launch] No ROS2 installation found — running in mock mode"
+  echo "[launch] No ROS2 installation found — live ROS2 topics unavailable"
 fi
 
 # Source rover workspace overlays when present so custom messages such as

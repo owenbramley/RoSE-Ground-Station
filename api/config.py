@@ -12,7 +12,7 @@ class WarningLevel:
 class Config:
     # Server
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = field(default_factory=lambda: int(os.environ.get("GS_PORT", "8000")))
 
     # ROS2 topics — cameras
     camera_topics: list = field(default_factory=lambda: [

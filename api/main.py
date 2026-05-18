@@ -149,7 +149,7 @@ async def _telemetry_broadcast():
             await telemetry_mgr.broadcast(payload)
         except Exception as e:
             logger.error(f"Telemetry broadcast error: {e}")
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(1.0)
 
 
 _log_cursor: int = 0
@@ -319,7 +319,10 @@ class EStopRequest(BaseModel):
 
 @app.post("/api/estop")
 async def estop(req: EStopRequest, _t: str = Depends(require_auth)):
-    bridge.send_estop(req.active)
+    try:
+        bridge.send_estop(req.active)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     return {"ok": True, "active": req.active}
 
 
@@ -367,6 +370,10 @@ async def get_warnings(_t: str = Depends(require_auth)):
 @app.get("/api/system")
 async def system_overview(_t: str = Depends(require_auth)):
     system = bridge.get_system()
+    ips = _get_local_ips()
+    system["current_ip"] = ips[0] if ips else "127.0.0.1"
+    system["ips"] = ips
+    system["urls"] = [f"http://{ip}:{config.port}" for ip in ips]
     system["subsystems"] = bridge.get_subsystems()
     system["comms"] = bridge.get_comms()
     system["payload_arduino"] = bridge.get_payload_arduino()
@@ -374,6 +381,12 @@ async def system_overview(_t: str = Depends(require_auth)):
     system["led_controller"] = bridge.get_led_controller()
     system["motor_telemetry"] = bridge.get_motor_telemetry()
     return system
+
+
+@app.get("/api/jetson/temperature")
+@app.get("/api/jetson/temperatures")
+async def jetson_temperatures(_t: str = Depends(require_auth)):
+    return bridge.get_jetson_temperatures()
 
 
 @app.get("/api/subsystems")
@@ -415,7 +428,10 @@ async def payload_elevator(cmd: ElevatorCommand, _t: str = Depends(require_auth)
     if not bridge.is_payload_connected():
         raise HTTPException(status_code=503, detail="Payload subsystem not connected")
     steps = cmd.steps if cmd.direction == "up" else -cmd.steps
-    bridge.send_elevator(steps)
+    try:
+        bridge.send_elevator(steps)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     return {"ok": True, "direction": cmd.direction, "steps": abs(steps)}
 
 
@@ -429,7 +445,10 @@ async def payload_carousel(cmd: CarouselCommand, _t: str = Depends(require_auth)
     if not bridge.is_payload_connected():
         raise HTTPException(status_code=503, detail="Payload subsystem not connected")
     steps = cmd.steps if cmd.direction == "cw" else -cmd.steps
-    bridge.send_carousel(steps)
+    try:
+        bridge.send_carousel(steps)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     return {"ok": True, "direction": cmd.direction, "steps": abs(steps)}
 
 
@@ -442,7 +461,10 @@ class AugerCommand(BaseModel):
 async def payload_auger(cmd: AugerCommand, _t: str = Depends(require_auth)):
     if not bridge.is_payload_connected():
         raise HTTPException(status_code=503, detail="Payload subsystem not connected")
-    bridge.send_auger(cmd.speed, cmd.enabled)
+    try:
+        bridge.send_auger(cmd.speed, cmd.enabled)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     return {"ok": True, "speed": cmd.speed, "enabled": cmd.enabled}
 
 
@@ -518,6 +540,8 @@ async def clear_motor_faults(req: ClearMotorFaultsRequest, _t: str = Depends(req
         bridge.clear_motor_faults(req.group, req.device_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     return {"ok": True, "group": req.group, "device_id": req.device_id}
 
 

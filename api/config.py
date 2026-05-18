@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass, field
 
 
@@ -22,6 +23,12 @@ class Config:
     ])
     camera_labels: list = field(default_factory=lambda: [
         "FRONT", "REAR", "LEFT", "RIGHT"
+    ])
+    camera_source: str = field(default_factory=lambda: os.environ.get("GS_CAMERA_SOURCE", "udp").lower())
+    camera_udp_ports: list[int] = field(default_factory=lambda: [
+        int(port.strip())
+        for port in os.environ.get("GS_CAMERA_UDP_PORTS", "5000,5001,5002,5003").split(",")
+        if port.strip()
     ])
 
     # ROS2 topics — sensors

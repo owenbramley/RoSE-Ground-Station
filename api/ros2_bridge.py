@@ -1,14 +1,16 @@
 """
-ROS2 bridge — integrates with rclpy when available, falls back to realistic
-mock data so the UI can run without a live ROS2 environment.
+ROS2 bridge — integrates with rclpy when available and reports unknown/offline
+state when live rover data is not present.
 """
-import math
 import random
 import threading
 import time
 import logging
 import base64
+import shutil
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -17,6 +19,60 @@ import numpy as np
 from .config import config
 
 logger = logging.getLogger("ros2_bridge")
+
+THERMAL_ROOT = Path("/sys/class/thermal")
+
+
+def _read_temperature_c(path: Path) -> Optional[float]:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        value = float(raw)
+    except (OSError, ValueError):
+        return None
+    if abs(value) > 1000:
+        value /= 1000.0
+    return round(value, 1)
+
+
+def _read_jetson_temperatures(root: Path = THERMAL_ROOT) -> dict:
+    zones: list[dict] = []
+    try:
+        zone_paths = sorted(root.glob("thermal_zone*"))
+    except OSError:
+        zone_paths = []
+
+    for zone_path in zone_paths:
+        zone_type = ""
+        try:
+            zone_type = zone_path.joinpath("type").read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+        temp_c = _read_temperature_c(zone_path / "temp")
+        if temp_c is None:
+            continue
+        zones.append({
+            "zone": zone_path.name,
+            "type": zone_type or zone_path.name,
+            "temp_c": temp_c,
+        })
+
+    def pick_temp(*needles: str) -> Optional[float]:
+        for zone in zones:
+            zone_type = str(zone["type"]).lower()
+            if any(needle in zone_type for needle in needles):
+                return zone["temp_c"]
+        return None
+
+    cpu_c = pick_temp("cpu")
+    gpu_c = pick_temp("gpu")
+    return {
+        "available": bool(zones),
+        "source": str(root),
+        "cpu_c": cpu_c,
+        "gpu_c": gpu_c,
+        "zones": zones,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 # ---------------------------------------------------------------------------
 # Optional ROS2 imports
@@ -46,7 +102,7 @@ try:
 except ImportError:
     ROS2_AVAILABLE = False
     SPARK_TELEMETRY_AVAILABLE = False
-    logger.warning("rclpy not found — running in MOCK mode")
+    logger.warning("rclpy not found — ROS2 live data unavailable")
 
 
 # ---------------------------------------------------------------------------
@@ -58,27 +114,27 @@ class _DataStore:
         self._lock = threading.RLock()
         self.camera_frames: dict[int, Optional[bytes]] = {i: None for i in range(4)}
         self.telemetry: dict = {
-            "soc": 87.0,
-            "current": 8.5,
-            "voltage": 24.2,
-            "temperature": 42.0,
+            "soc": None,
+            "current": None,
+            "voltage": None,
+            "temperature": None,
         }
         self.gnss: dict = {
-            "lat": 43.6532,
-            "lon": -79.3832,
-            "fix": "3D",
-            "satellites": 9,
-            "valid": True,
+            "lat": None,
+            "lon": None,
+            "fix": "NO_DATA",
+            "satellites": None,
+            "valid": False,
         }
-        self.payload_connected: bool = True
-        self.arm_connected: bool = True
-        self.drive_connected: bool = True
+        self.payload_connected: bool = False
+        self.arm_connected: bool = False
+        self.drive_connected: bool = False
         self.payload_arduino: dict = {
-            "connected": True,
-            "publisher_active": True,
-            "subscriber_active": True,
-            "temperature_c": 23.8,
-            "moisture_pct": 38.0,
+            "connected": False,
+            "publisher_active": False,
+            "subscriber_active": False,
+            "temperature_c": None,
+            "moisture_pct": None,
             "last_update_s": 0,
         }
         self.life_analysis: dict = {
@@ -94,65 +150,57 @@ class _DataStore:
         self.subsystems: dict = {
             "payload": {
                 "label": "Payload",
-                "status": "nominal",
-                "connected": True,
-                "summary": "Science package online",
+                "status": "critical",
+                "connected": False,
+                "summary": "Awaiting ROS2 status",
                 "metrics": [
-                    {"label": "Arduino Pub", "value": "Active"},
-                    {"label": "Arduino Sub", "value": "Active"},
-                    {"label": "Moisture", "value": "38.0 %"},
+                    {"label": "Arduino Pub", "value": "No data"},
+                    {"label": "Arduino Sub", "value": "No data"},
+                    {"label": "Moisture", "value": "--"},
                 ],
             },
             "arm": {
                 "label": "Arm",
-                "status": "nominal",
-                "connected": True,
-                "summary": "Manipulator enabled",
+                "status": "critical",
+                "connected": False,
+                "summary": "Awaiting ROS2 status",
                 "metrics": [
-                    {"label": "Shoulder", "value": "0.0 deg"},
-                    {"label": "Elbow", "value": "0.0 deg"},
-                    {"label": "Wrist", "value": "0.0 deg"},
+                    {"label": "Mode", "value": "No data"},
+                    {"label": "Power", "value": "No data"},
+                    {"label": "Control", "value": "No data"},
                 ],
             },
             "drive": {
                 "label": "Drive / Chassis",
-                "status": "nominal",
-                "connected": True,
-                "summary": "Mobility controllers online",
+                "status": "critical",
+                "connected": False,
+                "summary": "Awaiting ROS2 status",
                 "metrics": [
-                    {"label": "Mode", "value": "Manual"},
-                    {"label": "Command", "value": "External"},
-                    {"label": "CAN", "value": "Nominal"},
+                    {"label": "Mode", "value": "No data"},
+                    {"label": "Command", "value": "No data"},
+                    {"label": "CAN", "value": "No data"},
                 ],
             },
         }
         self.motor_telemetry: dict = {"drive": {}, "arm": {}}
         self.comms: dict = {
-            "link_24ghz": {"label": "2.4 GHz", "stability": 86, "rssi_dbm": -58, "latency_ms": 18, "status": "nominal"},
-            "link_900mhz": {"label": "900 MHz", "stability": 78, "rssi_dbm": -72, "latency_ms": 42, "status": "nominal"},
+            "link_24ghz": {"label": "2.4 GHz", "stability": None, "rssi_dbm": None, "latency_ms": None, "status": "unknown"},
+            "link_900mhz": {"label": "900 MHz", "stability": None, "rssi_dbm": None, "latency_ms": None, "status": "unknown"},
         }
         self.led_controller: dict = {
-            "connected": True,
-            "publisher_active": True,
-            "subscriber_active": True,
-            "camera_360_connected": True,
-            "camera_360_streaming": True,
-            "camera_360_mode": "panorama",
+            "connected": False,
+            "publisher_active": False,
+            "subscriber_active": False,
+            "camera_360_connected": False,
+            "camera_360_streaming": False,
+            "camera_360_mode": None,
             "last_update_s": 0,
-            "leds": [
-                {"id": 0, "label": "Port Bow", "r": 255, "g": 0, "b": 0, "on": True},
-                {"id": 1, "label": "Starboard Bow", "r": 0, "g": 255, "b": 0, "on": True},
-                {"id": 2, "label": "Port Stern", "r": 0, "g": 0, "b": 255, "on": False},
-                {"id": 3, "label": "Star. Stern", "r": 255, "g": 255, "b": 255, "on": True},
-            ],
+            "leds": [],
         }
         self.system: dict = {
-            "jetson_temp": 67.3,
-            "cpu_percent": 34.0,
-            "ram_used_gb": 6.2,
-            "ram_total_gb": 16.0,
-            "imu_online": True,
-            "gnss_module_online": True,
+            "jetson_temp": None,
+            "imu_online": False,
+            "gnss_module_online": False,
             "uptime_s": 0,
         }
         self.logs: list[dict] = []
@@ -181,6 +229,13 @@ class _DataStore:
         with self._lock:
             s = dict(self.system)
             s["uptime_s"] = int(time.time() - self._start_time)
+            jetson_temps = _read_jetson_temperatures()
+            s["jetson_temperatures"] = jetson_temps
+            if jetson_temps["cpu_c"] is not None:
+                s["jetson_cpu_temp"] = jetson_temps["cpu_c"]
+                s["jetson_temp"] = jetson_temps["cpu_c"]
+            if jetson_temps["gpu_c"] is not None:
+                s["jetson_gpu_temp"] = jetson_temps["gpu_c"]
             return s
 
     def is_payload_connected(self) -> bool:
@@ -278,7 +333,7 @@ class _DataStore:
 
     def get_topic_overview(self) -> dict:
         return {
-            "mode": "live" if ROS2_AVAILABLE else "mock",
+            "mode": "live" if ROS2_AVAILABLE else "ros2_unavailable",
             "publishes": [
                 {"topic": config.estop_topic, "type": "std_msgs/Bool", "purpose": "Emergency stop state"},
                 {"topic": config.elevator_topic, "type": "std_msgs/Float32", "purpose": "Payload elevator step command"},
@@ -367,171 +422,146 @@ def _make_mock_frame(camera_id: int, frame_counter: int) -> bytes:
     return buf.tobytes() if ok else b""
 
 
-def _mock_loop():
-    """Generate synthetic telemetry, GPS and camera frames."""
+def _mock_camera_loop():
+    """Generate synthetic camera frames only when explicitly requested."""
     frame_ctr = 0
-    t0 = time.time()
-    soc = 87.0
-    temp = 42.0
-    lat = 43.6532
-    lon = -79.3832
-    toggle_timer = time.time()
-
-    store.add_log("INFO",  "Mock mode active — ROS2 not detected", "bridge")
-    store.add_log("WARN",  "Camera topics not available — showing synthetic feeds", "bridge")
-    store.add_log("INFO",  "Telemetry simulation started", "bridge")
+    store.add_log("WARN", "GS_CAMERA_SOURCE=mock; showing synthetic camera feeds only", "camera")
 
     while True:
-        elapsed = time.time() - t0
-        t = time.time()
-
-        # --- cameras ---------------------------------------------------------
         for cam_id in range(4):
             frame = _make_mock_frame(cam_id, frame_ctr)
             store.set_camera_frame(cam_id, frame)
         frame_ctr += 1
-
-        # --- telemetry -------------------------------------------------------
-        soc = max(0.0, soc - 0.003 + random.uniform(-0.001, 0.001))
-        temp = 42.0 + 8.0 * math.sin(elapsed / 60) + random.uniform(-0.5, 0.5)
-        current = 8.5 + 3.0 * math.sin(elapsed / 12) + random.uniform(-0.3, 0.3)
-        voltage = 24.2 - (87.0 - soc) * 0.05 + random.uniform(-0.05, 0.05)
-        with store._lock:
-            store.telemetry = {
-                "soc": round(soc, 2),
-                "current": round(abs(current), 2),
-                "voltage": round(voltage, 2),
-                "temperature": round(temp, 1),
-            }
-            mock_motors = {
-                "drive": [
-                    (1, "front_right"), (2, "back_right"), (3, "front_left"), (4, "back_left"),
-                ],
-                "arm": [
-                    (5, "joint1"), (6, "joint2"), (7, "joint3"), (8, "diff_wrist_1"), (9, "diff_wrist_2"),
-                ],
-            }
-            for group, motors in mock_motors.items():
-                store.motor_telemetry.setdefault(group, {})
-                for idx, (device_id, name) in enumerate(motors):
-                    fault = int(elapsed / 90) % 5 == 2 and idx == 1
-                    connected = not (int(elapsed / 70) % 6 == 3 and idx == 0)
-                    motor_temp = temp + idx * 0.8 + (2.0 if group == "arm" else 0.0)
-                    motor_current = abs(current) / max(1, len(motors)) + idx * 0.25
-                    store.motor_telemetry[group][device_id] = {
-                        "device_id": device_id,
-                        "name": name,
-                        "group": group,
-                        "connected": connected,
-                        "applied_output": round(0.12 * math.sin(elapsed / 8 + idx), 3),
-                        "motor_velocity_rpm": round(300 * math.sin(elapsed / 9 + idx), 1),
-                        "motor_temperature_c": round(motor_temp, 1),
-                        "bus_voltage_v": round(voltage, 2),
-                        "motor_current_a": round(motor_current, 2),
-                        "faults": 1 << 1 if fault else 0,
-                        "sticky_faults": 1 << 9 if fault else 0,
-                        "fault_names": ["Overcurrent"] if fault else [],
-                        "sticky_fault_names": ["HasReset"] if fault else [],
-                        "last_update_s": time.time(),
-                        "status": "critical" if fault or not connected else "nominal",
-                    }
-            payload_temp = 23.8 + 2.5 * math.sin(elapsed / 28) + random.uniform(-0.2, 0.2)
-            payload_moisture = 38.0 + 6.0 * math.sin(elapsed / 37) + random.uniform(-0.8, 0.8)
-            store.payload_arduino.update({
-                "connected": store.payload_connected,
-                "publisher_active": store.payload_connected,
-                "subscriber_active": store.payload_connected,
-                "temperature_c": round(payload_temp, 1),
-                "moisture_pct": round(max(0, min(100, payload_moisture)), 1),
-                "last_update_s": round(elapsed, 1),
-            })
-            store.led_controller.update({
-                "connected": True,
-                "publisher_active": True,
-                "subscriber_active": True,
-                "camera_360_connected": True,
-                "camera_360_streaming": (int(elapsed / 20) % 6) != 5,
-                "camera_360_mode": "panorama" if int(elapsed / 30) % 2 == 0 else "inspection",
-                "last_update_s": round(elapsed, 1),
-            })
-            brightness = int(128 + 127 * abs(math.sin(elapsed / 10)))
-            store.led_controller["leds"] = [
-                {"id": 0, "label": "Port Bow", "r": brightness, "g": 24, "b": 20, "on": True},
-                {"id": 1, "label": "Starboard Bow", "r": 20, "g": brightness, "b": 34, "on": True},
-                {"id": 2, "label": "Port Stern", "r": 20, "g": 52, "b": brightness, "on": int(elapsed / 12) % 2 == 0},
-                {"id": 3, "label": "Star. Stern", "r": brightness, "g": brightness, "b": brightness, "on": True},
-            ]
-
-        # --- GNSS ------------------------------------------------------------
-        lat += random.uniform(-0.000005, 0.000005)
-        lon += random.uniform(-0.000005, 0.000005)
-        with store._lock:
-            store.gnss = {
-                "lat": round(lat, 7),
-                "lon": round(lon, 7),
-                "fix": "3D",
-                "satellites": random.randint(8, 12),
-                "valid": True,
-            }
-
-        # --- system ----------------------------------------------------------
-        with store._lock:
-            store.system["jetson_temp"] = round(67.0 + 5 * math.sin(elapsed / 90) + random.uniform(-0.3, 0.3), 1)
-            store.system["cpu_percent"] = round(34.0 + 20 * abs(math.sin(elapsed / 30)), 1)
-            link_24 = max(0, min(100, 86 + 8 * math.sin(elapsed / 35) + random.uniform(-3, 3)))
-            link_900 = max(0, min(100, 78 + 10 * math.sin(elapsed / 48) + random.uniform(-4, 4)))
-            store.comms["link_24ghz"].update({
-                "stability": round(link_24),
-                "rssi_dbm": round(-48 - (100 - link_24) * 0.55),
-                "latency_ms": round(14 + (100 - link_24) * 0.45),
-                "status": "nominal" if link_24 >= 70 else "degraded" if link_24 >= 45 else "critical",
-            })
-            store.comms["link_900mhz"].update({
-                "stability": round(link_900),
-                "rssi_dbm": round(-54 - (100 - link_900) * 0.7),
-                "latency_ms": round(24 + (100 - link_900) * 0.8),
-                "status": "nominal" if link_900 >= 70 else "degraded" if link_900 >= 45 else "critical",
-            })
-            store.subsystems["payload"]["connected"] = store.payload_connected
-            store.subsystems["arm"]["connected"] = store.arm_connected
-            store.subsystems["drive"]["connected"] = store.drive_connected
-            store.subsystems["payload"]["metrics"] = [
-                {"label": "Arduino Pub", "value": "Active" if store.payload_arduino["publisher_active"] else "Offline"},
-                {"label": "Arduino Sub", "value": "Active" if store.payload_arduino["subscriber_active"] else "Offline"},
-                {"label": "Moisture", "value": f"{store.payload_arduino['moisture_pct']:.1f} %"},
-            ]
-            store.subsystems["arm"]["metrics"] = [
-                {"label": "Mode", "value": "Status only"},
-                {"label": "Power", "value": "Online" if store.arm_connected else "Offline"},
-                {"label": "Control", "value": "Disabled"},
-            ]
-            store.subsystems["drive"]["metrics"] = [
-                {"label": "Mode", "value": "Manual"},
-                {"label": "Command", "value": "External"},
-                {"label": "CAN", "value": "Nominal"},
-            ]
-
-        # --- subsystem toggle (simulate connect/disconnect) ------------------
-        if t - toggle_timer > 45:
-            toggle_timer = t
-            with store._lock:
-                store.payload_connected = not store.payload_connected
-            state = "connected" if store.is_payload_connected() else "disconnected"
-            store.add_log("INFO", f"Payload subsystem {state}", "payload")
-
-        # --- occasional log entries ------------------------------------------
-        if int(elapsed) % 10 == 0 and int(elapsed) > 0:
-            roll = random.random()
-            if roll < 0.05:
-                store.add_log("ERROR", "CAN bus timeout on motor controller 2", "can")
-            elif roll < 0.15:
-                store.add_log("WARN", f"Battery temperature elevated: {temp:.1f}°C", "battery")
-            elif roll < 0.30:
-                store.add_log("DEBUG", f"GNSS fix: {lat:.6f}, {lon:.6f}", "gnss")
-            else:
-                store.add_log("INFO", f"Telemetry tick — SOC {soc:.1f}%  I={abs(current):.1f}A  T={temp:.1f}°C", "telemetry")
-
         time.sleep(1.0 / config.camera_fps)
+
+
+# ---------------------------------------------------------------------------
+# UDP/RTP H264 camera receiver
+# ---------------------------------------------------------------------------
+
+def _gst_udp_h264_pipeline(port: int) -> str:
+    return (
+        f"udpsrc port={port} "
+        'caps="application/x-rtp,media=video,encoding-name=H264,payload=96" ! '
+        "rtph264depay ! "
+        "h264parse ! "
+        "avdec_h264 ! "
+        "videoconvert ! "
+        "appsink drop=true max-buffers=1 sync=false"
+    )
+
+
+def _gst_udp_jpeg_command(port: int) -> list[str]:
+    return [
+        "gst-launch-1.0",
+        "-q",
+        "udpsrc",
+        f"port={port}",
+        "caps=application/x-rtp,media=video,encoding-name=H264,payload=96",
+        "!",
+        "rtph264depay",
+        "!",
+        "h264parse",
+        "!",
+        "avdec_h264",
+        "!",
+        "videoconvert",
+        "!",
+        "jpegenc",
+        f"quality={config.jpeg_quality}",
+        "!",
+        "fdsink",
+        "fd=1",
+    ]
+
+
+def _gst_subprocess_camera_loop(camera_id: int, port: int):
+    if not shutil.which("gst-launch-1.0"):
+        store.add_log("ERROR", "gst-launch-1.0 not found; install GStreamer to receive UDP cameras", "camera")
+        time.sleep(5.0)
+        return
+
+    store.add_log("INFO", f"Camera {camera_id} using gst-launch receiver on port {port}", "camera")
+    proc = subprocess.Popen(
+        _gst_udp_jpeg_command(port),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        bufsize=0,
+    )
+
+    assert proc.stdout is not None
+    buffer = bytearray()
+    last_frame_s = time.time()
+    try:
+        while proc.poll() is None:
+            chunk = proc.stdout.read(4096)
+            if not chunk:
+                time.sleep(0.01)
+                continue
+
+            buffer.extend(chunk)
+            while True:
+                start = buffer.find(b"\xff\xd8")
+                end = buffer.find(b"\xff\xd9", start + 2) if start >= 0 else -1
+                if start < 0:
+                    del buffer[:-1]
+                    break
+                if end < 0:
+                    if start > 0:
+                        del buffer[:start]
+                    break
+
+                frame = bytes(buffer[start:end + 2])
+                del buffer[:end + 2]
+                store.set_camera_frame(camera_id, frame)
+                last_frame_s = time.time()
+
+            if time.time() - last_frame_s > 5.0:
+                store.add_log("WARN", f"Camera {camera_id} has not received a JPEG frame in 5 seconds", "camera")
+                last_frame_s = time.time()
+    finally:
+        proc.terminate()
+        try:
+            proc.communicate(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+
+
+def _udp_camera_loop(camera_id: int, port: int):
+    label = config.camera_labels[camera_id] if camera_id < len(config.camera_labels) else str(camera_id)
+    store.add_log("INFO", f"Opening UDP/RTP camera {camera_id} ({label}) on port {port}", "camera")
+
+    while True:
+        cap = cv2.VideoCapture(_gst_udp_h264_pipeline(port), cv2.CAP_GSTREAMER)
+        if not cap.isOpened():
+            store.add_log("WARN", f"OpenCV GStreamer receiver unavailable for camera {camera_id}; trying gst-launch", "camera")
+            _gst_subprocess_camera_loop(camera_id, port)
+            time.sleep(2.0)
+            continue
+
+        store.add_log("INFO", f"Camera {camera_id} receiving UDP/RTP H264 on port {port}", "camera")
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                store.add_log("WARN", f"Camera {camera_id} stream lost on port {port}; reconnecting", "camera")
+                cap.release()
+                time.sleep(1.0)
+                break
+
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, config.jpeg_quality])
+            if ok:
+                store.set_camera_frame(camera_id, buf.tobytes())
+
+
+def _start_udp_camera_receivers():
+    if not config.camera_udp_ports:
+        store.add_log("WARN", "GS_CAMERA_SOURCE=udp but no UDP ports configured", "camera")
+        return
+
+    for camera_id, port in enumerate(config.camera_udp_ports[:4]):
+        t = threading.Thread(target=_udp_camera_loop, args=(camera_id, int(port)), daemon=True)
+        t.start()
 
 
 # ---------------------------------------------------------------------------
@@ -544,8 +574,9 @@ if ROS2_AVAILABLE:
             super().__init__("rose_ground_station")
             store.add_log("INFO", "ROS2 node initialised", "ros2")
 
-            for i, topic in enumerate(config.camera_topics):
-                self.create_subscription(Image, topic, self._make_cam_cb(i), 5)
+            if config.camera_source == "ros2":
+                for i, topic in enumerate(config.camera_topics):
+                    self.create_subscription(Image, topic, self._make_cam_cb(i), 5)
 
             self.create_subscription(NavSatFix, config.gnss_topic, self._gnss_cb, 10)
             self.create_subscription(BatteryState, config.battery_topic, self._battery_cb, 10)
@@ -680,10 +711,12 @@ if ROS2_AVAILABLE:
                 store.payload_arduino["publisher_active"] = pub_active
                 store.payload_arduino["subscriber_active"] = sub_active
                 store.payload_arduino["connected"] = store.payload_connected and pub_active and sub_active
+                moisture = store.payload_arduino.get("moisture_pct")
+                moisture_value = f"{moisture:.1f} %" if isinstance(moisture, (int, float)) else "--"
                 store.subsystems["payload"]["metrics"] = [
                     {"label": "Arduino Pub", "value": "Active" if pub_active else "Offline"},
                     {"label": "Arduino Sub", "value": "Active" if sub_active else "Offline"},
-                    {"label": "Moisture", "value": f"{store.payload_arduino['moisture_pct']:.1f} %"},
+                    {"label": "Moisture", "value": moisture_value},
                 ]
 
         # --- publishers -------------------------------------------------------
@@ -741,11 +774,14 @@ if ROS2_AVAILABLE:
 class ROS2Bridge:
     def __init__(self):
         self._node: Optional["_RoverNode"] = None  # type: ignore[name-defined]
+        if config.camera_source == "udp":
+            _start_udp_camera_receivers()
+        elif config.camera_source == "mock":
+            threading.Thread(target=_mock_camera_loop, daemon=True).start()
         if ROS2_AVAILABLE:
             self._init_ros2()
         else:
-            t = threading.Thread(target=_mock_loop, daemon=True)
-            t.start()
+            store.add_log("ERROR", "ROS2 unavailable; live rover topics are not connected", "bridge")
 
     def _init_ros2(self):
         try:
@@ -757,9 +793,7 @@ class ROS2Bridge:
             t.start()
             store.add_log("INFO", "ROS2 executor running", "bridge")
         except Exception as e:
-            store.add_log("ERROR", f"ROS2 init failed: {e} — switching to mock", "bridge")
-            t = threading.Thread(target=_mock_loop, daemon=True)
-            t.start()
+            store.add_log("ERROR", f"ROS2 init failed: {e}; live rover topics are not connected", "bridge")
 
     # --- data accessors -------------------------------------------------------
 
@@ -774,6 +808,9 @@ class ROS2Bridge:
 
     def get_system(self) -> dict:
         return store.get_system()
+
+    def get_jetson_temperatures(self) -> dict:
+        return _read_jetson_temperatures()
 
     def is_payload_connected(self) -> bool:
         return store.is_payload_connected()
@@ -813,29 +850,27 @@ class ROS2Bridge:
 
     # --- commands -------------------------------------------------------------
 
+    def _require_node(self):
+        if not self._node:
+            raise RuntimeError("ROS2 bridge is not connected")
+        return self._node
+
     def send_estop(self, active: bool = True):
-        if self._node:
-            self._node.publish_estop(active)
-        else:
-            store.add_log("WARN" if active else "INFO",
-                          f"E-STOP {'ACTIVATED' if active else 'RESET'} (mock)", "estop")
+        self._require_node().publish_estop(active)
 
     def send_elevator(self, steps: int):
         direction = "UP" if steps > 0 else "DOWN"
         store.add_log("INFO", f"Elevator step command: {direction} {abs(steps)} steps", "payload")
-        if self._node:
-            self._node.publish_elevator(float(steps))
+        self._require_node().publish_elevator(float(steps))
 
     def send_carousel(self, steps: float):
         direction = "CW" if steps > 0 else "CCW"
         store.add_log("INFO", f"Carousel command: {direction} {abs(steps)} steps", "payload")
-        if self._node:
-            self._node.publish_carousel(steps)
+        self._require_node().publish_carousel(steps)
 
     def send_auger(self, speed: float, enabled: bool):
         store.add_log("INFO", f"Auger command: {'ON' if enabled else 'OFF'} @ {speed:.0f}%", "payload")
-        if self._node:
-            self._node.publish_auger(speed if enabled else 0.0)
+        self._require_node().publish_auger(speed if enabled else 0.0)
 
     def clear_motor_faults(self, group: str, device_id: int):
         group = group.lower()
@@ -848,19 +883,7 @@ class ROS2Bridge:
             f"Clear SPARK sticky faults requested for {group} motor id {device_id or 'ALL'}",
             "can",
         )
-        if self._node:
-            self._node.publish_clear_motor_faults(group, device_id)
-        else:
-            with store._lock:
-                motors = store.motor_telemetry.get(group, {})
-                targets = motors.values() if device_id == 0 else [motors.get(device_id)]
-                for motor in targets:
-                    if motor:
-                        motor["sticky_faults"] = 0
-                        motor["sticky_fault_names"] = []
-                        motor["faults"] = 0
-                        motor["fault_names"] = []
-                        motor["status"] = "nominal" if motor.get("connected") else "critical"
+        self._require_node().publish_clear_motor_faults(group, device_id)
 
     def start_life_analysis(self):
         now = time.time()
@@ -882,8 +905,7 @@ class ROS2Bridge:
             "360 capture command bytes: " + " ".join(f"0x{b:02X}" for b in command_bytes),
             "led_arduino",
         )
-        if self._node:
-            self._node.publish_camera360_capture(command_bytes)
+        self._require_node().publish_camera360_capture(command_bytes)
 
         frames = []
         for camera_id in range(4):

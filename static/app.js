@@ -158,10 +158,29 @@ function fmtTime(isoStr) {
 }
 
 function fmtUptime(s) {
+  if (!Number.isFinite(Number(s))) return '--';
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
   return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+}
+
+function asFiniteNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function fmtNumber(value, digits = 1, suffix = '') {
+  const n = asFiniteNumber(value);
+  return n === null ? '--' : `${n.toFixed(digits)}${suffix}`;
+}
+
+function setBarWidth(id, value, maxVal = 100) {
+  const bar = document.getElementById(id);
+  if (!bar) return;
+  const n = asFiniteNumber(value);
+  const max = asFiniteNumber(maxVal) || 100;
+  bar.style.width = n === null ? '0%' : `${Math.min(100, Math.max(0, (n / max) * 100))}%`;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -351,12 +370,14 @@ function handleTelemetryMsg(msg) {
 // ══════════════════════════════════════════════════════════════
 
 function levelClass(value, warn, crit) {
+  if (!Number.isFinite(Number(value))) return 'warn';
   if (value >= crit) return 'crit';
   if (value >= warn) return 'warn';
   return 'ok';
 }
 
 function levelClassInv(value, warn, crit) {
+  if (!Number.isFinite(Number(value))) return 'warn';
   if (value <= crit) return 'crit';
   if (value <= warn) return 'warn';
   return 'ok';
@@ -367,32 +388,34 @@ function applyTelemetryCard(id, barId, badgeId, value, maxVal, cls) {
   const bar   = document.getElementById(barId);
   const badge = document.getElementById(badgeId);
   if (!card || !bar || !badge) return;
-  const pct   = Math.min(100, Math.max(0, (value / maxVal) * 100));
+  const n = asFiniteNumber(value);
+  const pct = n === null ? 0 : Math.min(100, Math.max(0, (n / maxVal) * 100));
 
   bar.style.width     = pct + '%';
   card.className      = 'telem-card' + (cls !== 'ok' ? ` state-${cls}` : '');
   bar.className       = 'telem-bar'  + (cls !== 'ok' ? ` ${cls}` : '');
   badge.className     = 'telem-badge' + (cls !== 'ok' ? ` ${cls}` : '');
-  badge.textContent   = cls.toUpperCase();
+  badge.textContent   = n === null ? 'NO DATA' : cls.toUpperCase();
 }
 
 function updateTelemetry(t) {
   if (!document.getElementById('socVal')) return;
+  t = t || {};
   const w = state.warnings;
 
   const socCls = levelClassInv(t.soc, w.soc.warning, w.soc.critical);
-  document.getElementById('socVal').textContent = t.soc.toFixed(1);
+  document.getElementById('socVal').textContent = fmtNumber(t.soc, 1);
   applyTelemetryCard('socCard', 'socBar', 'socBadge', t.soc, 100, socCls);
 
   const curCls = levelClass(t.current, w.cur.warning, w.cur.critical);
-  document.getElementById('curVal').textContent = t.current.toFixed(1);
+  document.getElementById('curVal').textContent = fmtNumber(t.current, 1);
   applyTelemetryCard('curCard', 'curBar', 'curBadge', t.current, w.cur.critical * 1.2, curCls);
 
   const tempCls = levelClass(t.temperature, w.temp.warning, w.temp.critical);
-  document.getElementById('tempVal').textContent = t.temperature.toFixed(1);
+  document.getElementById('tempVal').textContent = fmtNumber(t.temperature, 1);
   applyTelemetryCard('tempCard', 'tempBar', 'tempBadge', t.temperature, w.temp.critical * 1.2, tempCls);
 
-  document.getElementById('voltVal').textContent = t.voltage.toFixed(1);
+  document.getElementById('voltVal').textContent = fmtNumber(t.voltage, 1);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -420,18 +443,22 @@ function initMap() {
 }
 
 function updateGPS(g) {
+  g = g || {};
   if (!g.valid || !_map) return;
-  const ll = [g.lat, g.lon];
+  const lat = asFiniteNumber(g.lat);
+  const lon = asFiniteNumber(g.lon);
+  if (lat === null || lon === null) return;
+  const ll = [lat, lon];
   _roverMarker.setLatLng(ll);
   _trailPoints.push(ll);
   if (_trailPoints.length > MAX_TRAIL) _trailPoints.shift();
   _gpsTrail.setLatLngs(_trailPoints);
   if (!_map.getBounds().contains(ll)) _map.panTo(ll, { animate: true, duration: 0.5 });
 
-  document.getElementById('gpsLat').textContent     = g.lat.toFixed(6);
-  document.getElementById('gpsLon').textContent     = g.lon.toFixed(6);
+  document.getElementById('gpsLat').textContent     = lat.toFixed(6);
+  document.getElementById('gpsLon').textContent     = lon.toFixed(6);
   document.getElementById('gpsFix').textContent     = g.fix;
-  document.getElementById('gpsSats').textContent    = g.satellites;
+  document.getElementById('gpsSats').textContent    = g.satellites ?? '--';
   document.getElementById('gpsUpdated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
 
   const badge = document.getElementById('gpsBadge');
@@ -834,12 +861,15 @@ function updateSubsysHeader(name, connected) {
 async function refreshSystemData() {
   try {
     const d = await apiFetch('/api/system');
-    document.getElementById('sysJetsonTemp').textContent = `${d.jetson_temp} °C`;
-    document.getElementById('sysJetsonTempBar').style.width = `${Math.min(100, d.jetson_temp)}%`;
-    document.getElementById('sysCpuPct').textContent = `${d.cpu_percent} %`;
-    document.getElementById('sysCpuBar').style.width  = `${d.cpu_percent}%`;
-    document.getElementById('sysRam').textContent = `${d.ram_used_gb} / ${d.ram_total_gb} GB`;
-    document.getElementById('sysRamBar').style.width  = `${Math.round((d.ram_used_gb / d.ram_total_gb) * 100)}%`;
+    const jetsonTemp = d.jetson_cpu_temp ?? d.jetson_temp;
+    document.getElementById('sysJetsonTemp').textContent = fmtNumber(jetsonTemp, 1, ' °C');
+    setBarWidth('sysJetsonTempBar', jetsonTemp, 100);
+    document.getElementById('sysCpuPct').textContent = fmtNumber(d.cpu_percent, 1, ' %');
+    setBarWidth('sysCpuBar', d.cpu_percent, 100);
+    const ramUsed = asFiniteNumber(d.ram_used_gb);
+    const ramTotal = asFiniteNumber(d.ram_total_gb);
+    document.getElementById('sysRam').textContent = ramUsed === null || ramTotal === null ? '--' : `${ramUsed.toFixed(1)} / ${ramTotal.toFixed(1)} GB`;
+    setBarWidth('sysRamBar', ramUsed, ramTotal || 100);
     document.getElementById('sysUptime').textContent = fmtUptime(d.uptime_s);
     updateSubsystemOverview(d.subsystems || {});
     updateComms(d.comms || {});
@@ -858,6 +888,7 @@ function setStatusDot(dotId, value) {
 }
 
 function updatePayloadArduino(a) {
+  a = a || {};
   setStatusDot('payloadArduinoPubDot', !!a.publisher_active);
   setStatusDot('payloadArduinoSubDot', !!a.subscriber_active);
   setStatusDot('payloadArduinoConnDot', !!a.connected);
@@ -867,8 +898,10 @@ function updatePayloadArduino(a) {
   if (pubVal) pubVal.textContent = a.publisher_active ? 'Active' : 'Not detected';
   if (subVal) subVal.textContent = a.subscriber_active ? 'Active' : 'Not detected';
   if (connVal) connVal.textContent = a.connected ? 'Connected' : 'Disconnected';
-  if (Number.isFinite(a.temperature_c)) document.getElementById('payloadTempVal').textContent = a.temperature_c.toFixed(1);
-  if (Number.isFinite(a.moisture_pct)) document.getElementById('payloadMoistureVal').textContent = a.moisture_pct.toFixed(1);
+  const tempEl = document.getElementById('payloadTempVal');
+  const moistureEl = document.getElementById('payloadMoistureVal');
+  if (tempEl) tempEl.textContent = fmtNumber(a.temperature_c, 1);
+  if (moistureEl) moistureEl.textContent = fmtNumber(a.moisture_pct, 1);
 }
 
 function updateLifeAnalysis(life) {
@@ -927,20 +960,24 @@ function updateLedController(c) {
 }
 
 function linkClass(stability) {
+  if (!Number.isFinite(Number(stability))) return 'dot-yellow';
   if (stability >= 70) return 'dot-green';
   if (stability >= 45) return 'dot-yellow';
   return 'dot-red';
 }
 
 function updateComms(comms) {
+  comms = comms || {};
   const link24 = comms.link_24ghz;
   const link900 = comms.link_900mhz;
   if (link24) {
-    document.getElementById('link24Val').textContent = `${Math.round(link24.stability)}%`;
+    const stability = asFiniteNumber(link24.stability);
+    document.getElementById('link24Val').textContent = stability === null ? '--' : `${Math.round(stability)}%`;
     document.getElementById('link24Dot').className = `status-dot ${linkClass(link24.stability)}`;
   }
   if (link900) {
-    document.getElementById('link900Val').textContent = `${Math.round(link900.stability)}%`;
+    const stability = asFiniteNumber(link900.stability);
+    document.getElementById('link900Val').textContent = stability === null ? '--' : `${Math.round(stability)}%`;
     document.getElementById('link900Dot').className = `status-dot ${linkClass(link900.stability)}`;
   }
 }
@@ -951,7 +988,7 @@ function updateSubsystemOverview(subsystems) {
   const order = ['payload', 'arm', 'drive'];
   grid.innerHTML = order.map(key => {
     const s = subsystems[key] || {};
-    const connected = s.connected !== false;
+    const connected = s.connected === true;
     const status = connected ? (s.status || 'nominal') : 'critical';
     const dot = connected ? (status === 'nominal' ? 'dot-green' : status === 'degraded' ? 'dot-yellow' : 'dot-red') : 'dot-red';
     const metrics = (s.metrics || []).slice(0, 3).map(m => `
@@ -1018,9 +1055,9 @@ function renderMotorTable(group, motorsById) {
     return `
       <div class="drive-row motor-row ${motor.connected ? '' : 'offline'}">
         <span title="${escHtml(rawFaults)}">${escHtml(motor.name || `id ${id}`)} <em>#${id}</em></span>
-        <span>${Number(motor.motor_temperature_c || 0).toFixed(1)} °C</span>
-        <span>${Number(motor.motor_current_a || 0).toFixed(1)} A</span>
-        <span>${Number(motor.bus_voltage_v || 0).toFixed(1)} V</span>
+        <span>${fmtNumber(motor.motor_temperature_c, 1, ' °C')}</span>
+        <span>${fmtNumber(motor.motor_current_a, 1, ' A')}</span>
+        <span>${fmtNumber(motor.bus_voltage_v, 1, ' V')}</span>
         <span class="${status.cls}" title="${escHtml(faults)}">${status.label}</span>
         <button class="btn-secondary btn-sm clear-faults-btn" data-group="${escHtml(group)}" data-device-id="${id}">Clear</button>
       </div>

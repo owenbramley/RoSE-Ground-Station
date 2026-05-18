@@ -315,19 +315,19 @@
         <div class="section-header"><span>System Health</span></div>
         <div class="sys-status-row">
           <div class="sys-status-item" id="sysPayloadConn">
-            <span class="status-dot dot-green"></span>
+            <span class="status-dot dot-red"></span>
             <span class="sys-item-label">Payload</span>
-            <span class="sys-item-val" id="sysPayloadVal">Connected</span>
+            <span class="sys-item-val" id="sysPayloadVal">Disconnected</span>
           </div>
           <div class="sys-status-item" id="sysArmConn">
-            <span class="status-dot dot-green"></span>
+            <span class="status-dot dot-red"></span>
             <span class="sys-item-label">Arm</span>
-            <span class="sys-item-val" id="sysArmVal">Connected</span>
+            <span class="sys-item-val" id="sysArmVal">Disconnected</span>
           </div>
           <div class="sys-status-item" id="sysDriveConn">
-            <span class="status-dot dot-green"></span>
+            <span class="status-dot dot-red"></span>
             <span class="sys-item-label">Drive / Chassis</span>
-            <span class="sys-item-val" id="sysDriveVal">Connected</span>
+            <span class="sys-item-val" id="sysDriveVal">Disconnected</span>
           </div>
           <div class="sys-status-item">
             <span class="status-dot dot-green"></span>
@@ -342,7 +342,7 @@
           <div class="sys-status-item">
             <span class="status-dot dot-yellow"></span>
             <span class="sys-item-label">Radio Link</span>
-            <span class="sys-item-val">72% signal</span>
+            <span class="sys-item-val">--</span>
           </div>
           <div class="sys-status-item">
             <span class="status-dot dot-green"></span>
@@ -358,18 +358,18 @@
         <div class="compute-grid">
           <div class="compute-item">
             <div class="compute-label">CPU Temperature</div>
-            <div class="compute-val" id="sysJetsonTemp">67.3 °C</div>
-            <div class="telem-bar-bg"><div class="telem-bar" id="sysJetsonTempBar" style="width:56%"></div></div>
+            <div class="compute-val" id="sysJetsonTemp">--</div>
+            <div class="telem-bar-bg"><div class="telem-bar" id="sysJetsonTempBar" style="width:0%"></div></div>
           </div>
           <div class="compute-item">
             <div class="compute-label">CPU Usage</div>
-            <div class="compute-val" id="sysCpuPct">34.0 %</div>
-            <div class="telem-bar-bg"><div class="telem-bar" id="sysCpuBar" style="width:34%"></div></div>
+            <div class="compute-val" id="sysCpuPct">--</div>
+            <div class="telem-bar-bg"><div class="telem-bar" id="sysCpuBar" style="width:0%"></div></div>
           </div>
           <div class="compute-item">
             <div class="compute-label">Memory</div>
-            <div class="compute-val" id="sysRam">6.2 / 16.0 GB</div>
-            <div class="telem-bar-bg"><div class="telem-bar" id="sysRamBar" style="width:38%"></div></div>
+            <div class="compute-val" id="sysRam">--</div>
+            <div class="telem-bar-bg"><div class="telem-bar" id="sysRamBar" style="width:0%"></div></div>
           </div>
           <div class="compute-item">
             <div class="compute-label">Uptime</div>
@@ -452,7 +452,7 @@
           </div>
           <div class="net-row">
             <span class="net-label">Latency</span>
-            <span class="net-val">8 ms</span>
+            <span class="net-val">--</span>
           </div>
           <div class="net-row">
             <span class="net-label">Radio Band</span>

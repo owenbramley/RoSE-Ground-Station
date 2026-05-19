@@ -25,6 +25,7 @@
       <button class="tab-btn" data-tab="logs">Logs</button>
       <button class="tab-btn" data-tab="files">Files</button>
       <button class="tab-btn" data-tab="system">System Overview</button>
+      <button class="tab-btn" data-tab="network">Network</button>
       <button class="tab-btn" data-tab="payload">Payload</button>
     </nav>
   </div>
@@ -176,6 +177,24 @@
   </div>
 </div>
 
+<!-- HD still capture modal -->
+<div id="cameraStillModal" class="modal-overlay hidden">
+  <div class="modal-box camera-still-modal-box">
+    <div class="modal-header">
+      <span id="cameraStillTitle">Camera Still</span>
+      <button class="modal-close" id="closeCameraStillModal">✕</button>
+    </div>
+    <div class="camera-still-body">
+      <div class="capture360-status" id="cameraStillStatus">Ready</div>
+      <div class="camera-still-image-wrap">
+        <span id="cameraStillPlaceholder">No still captured</span>
+        <img id="cameraStillImg" class="hidden" alt="HD camera still" />
+      </div>
+      <a class="btn-primary camera-still-download hidden" id="cameraStillDownload" download="camera-still.jpg">Download Image</a>
+    </div>
+  </div>
+</div>
+
 <!-- ══════════════════════════════════════════════════════════════════════
      MAIN CONTENT
 ════════════════════════════════════════════════════════════════════════ -->
@@ -188,6 +207,41 @@
 
       <!-- Subsystems -->
       <div class="dashboard-side-stack">
+        <section class="section mission-mode-section">
+          <div class="section-header"><span>Mission Modes</span></div>
+          <div class="mission-mode-grid">
+            <button class="mission-mode-btn" data-mission-mode="equipment">
+              <span class="mission-mode-title">Equipment Servicing</span>
+              <span class="mission-mode-meta">Dashboard + Cameras</span>
+            </button>
+            <button class="mission-mode-btn" data-mission-mode="delivery">
+              <span class="mission-mode-title">Extreme Delivery</span>
+              <span class="mission-mode-meta">Dashboard + Cameras</span>
+            </button>
+            <button class="mission-mode-btn" data-mission-mode="autonav">
+              <span class="mission-mode-title">Autonav</span>
+              <span class="mission-mode-meta">No arm or payload</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="section dashboard-timer-section">
+          <div class="section-header">
+            <span>Dashboard Timer</span>
+            <span class="timer-sync-state" id="timerSyncState">SYNCING</span>
+          </div>
+          <div class="dashboard-timer-body">
+            <div class="dashboard-timer-display mono" id="dashboardTimerDisplay">00:00.00</div>
+            <div class="dashboard-timer-controls">
+              <button class="btn-secondary btn-sm" id="timerPauseBtn">Start</button>
+              <button class="btn-secondary btn-sm" id="timerLapBtn">Lap</button>
+              <button class="btn-secondary btn-sm" id="timerStopBtn">Stop</button>
+              <button class="btn-secondary btn-sm" id="timerResetBtn">Reset</button>
+            </div>
+            <div class="timer-laps" id="timerLaps"></div>
+          </div>
+        </section>
+
         <section class="section subsystem-overview-section">
           <div class="section-header"><span>Rover Subsystems</span></div>
           <div class="subsystem-overview-grid" id="subsystemOverviewGrid"></div>
@@ -220,48 +274,12 @@
       <div class="section-header camera-page-header">
         <span>Camera Feeds</span>
         <div class="camera-actions">
+          <button class="btn-secondary btn-sm" id="refreshCamerasBtn">Refresh Cameras</button>
           <button class="btn-secondary btn-sm" id="showAllCamerasBtn">Show All</button>
           <button class="btn-secondary btn-sm" id="capture360Btn">Capture 360 Image</button>
         </div>
       </div>
-      <div class="camera-grid" id="cameraGrid">
-        <div class="camera-cell" id="cam0" data-camera-id="0">
-          <div class="camera-label">FRONT</div>
-          <button class="camera-hide-btn" data-camera-id="0" title="Hide front camera">Hide</button>
-          <img class="camera-img" id="camImg0" src="/api/camera/0" alt="Front camera" />
-          <div class="camera-error hidden" id="camErr0">
-            <span class="cam-err-icon">⊗</span>
-            <span>Feed unavailable</span>
-          </div>
-        </div>
-        <div class="camera-cell" id="cam1" data-camera-id="1">
-          <div class="camera-label">REAR</div>
-          <button class="camera-hide-btn" data-camera-id="1" title="Hide rear camera">Hide</button>
-          <img class="camera-img" id="camImg1" src="/api/camera/1" alt="Rear camera" />
-          <div class="camera-error hidden" id="camErr1">
-            <span class="cam-err-icon">⊗</span>
-            <span>Feed unavailable</span>
-          </div>
-        </div>
-        <div class="camera-cell" id="cam2" data-camera-id="2">
-          <div class="camera-label">LEFT</div>
-          <button class="camera-hide-btn" data-camera-id="2" title="Hide left camera">Hide</button>
-          <img class="camera-img" id="camImg2" src="/api/camera/2" alt="Left camera" />
-          <div class="camera-error hidden" id="camErr2">
-            <span class="cam-err-icon">⊗</span>
-            <span>Feed unavailable</span>
-          </div>
-        </div>
-        <div class="camera-cell" id="cam3" data-camera-id="3">
-          <div class="camera-label">RIGHT</div>
-          <button class="camera-hide-btn" data-camera-id="3" title="Hide right camera">Hide</button>
-          <img class="camera-img" id="camImg3" src="/api/camera/3" alt="Right camera" />
-          <div class="camera-error hidden" id="camErr3">
-            <span class="cam-err-icon">⊗</span>
-            <span>Feed unavailable</span>
-          </div>
-        </div>
-      </div>
+      <div class="camera-grid" id="cameraGrid"></div>
       <div class="hidden-camera-dock" id="hiddenCameraDock" aria-label="Hidden cameras"></div>
     </section>
   </div><!-- /tab-cameras -->
@@ -300,7 +318,10 @@
   <!-- ── FILES ────────────────────────────────────────────────────── -->
   <div class="tab-content" id="tab-files">
     <section class="section files-section">
-      <div class="section-header"><span>External Storage</span></div>
+      <div class="section-header">
+        <span>External Storage</span>
+        <button class="btn-secondary btn-sm" id="refreshFilesBtn">Refresh USB</button>
+      </div>
       <div class="files-body">
         <div class="files-icon">⬡</div>
         <p class="files-desc">Connect an external storage device to browse rover log files and collected data.</p>
@@ -309,6 +330,11 @@
           Get Files
         </button>
         <div class="files-status" id="filesStatus"></div>
+        <div class="usb-device-list" id="usbDeviceList"></div>
+        <article class="text-file-viewer hidden" id="textFileViewer">
+          <div class="text-file-meta" id="textFileMeta"></div>
+          <pre class="text-file-content" id="textFileContent"></pre>
+        </article>
       </div>
     </section>
   </div><!-- /tab-files -->
@@ -365,17 +391,17 @@
         <div class="section-header"><span>Compute — Jetson Orin</span></div>
         <div class="compute-grid">
           <div class="compute-item">
-            <div class="compute-label">CPU Temperature</div>
+            <div class="compute-label">Rover CPU Temperature</div>
             <div class="compute-val" id="sysJetsonTemp">--</div>
             <div class="telem-bar-bg"><div class="telem-bar" id="sysJetsonTempBar" style="width:0%"></div></div>
           </div>
           <div class="compute-item">
-            <div class="compute-label">GPU Temperature</div>
+            <div class="compute-label">Rover GPU Temperature</div>
             <div class="compute-val" id="sysJetsonGpuTemp">--</div>
             <div class="telem-bar-bg"><div class="telem-bar" id="sysJetsonGpuTempBar" style="width:0%"></div></div>
           </div>
           <div class="compute-item">
-            <div class="compute-label">Current IP</div>
+            <div class="compute-label">Rover IP</div>
             <div class="compute-val mono" id="sysCurrentIp">--</div>
           </div>
         </div>
@@ -451,7 +477,7 @@
           </div>
           <div class="net-row">
             <span class="net-label">Rover IP</span>
-            <span class="net-val mono">192.168.10.100</span>
+            <span class="net-val mono" id="netRoverIp">--</span>
           </div>
           <div class="net-row">
             <span class="net-label">Latency</span>
@@ -474,6 +500,104 @@
 
     </div>
   </div><!-- /tab-system -->
+
+
+  <!-- ── NETWORK ─────────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-network">
+    <section class="section network-config-section">
+      <div class="section-header">
+        <span>Rocket Radios</span>
+        <span class="network-updated mono" id="networkUpdated">Not polled</span>
+      </div>
+      <div class="network-config-grid">
+        <label class="network-ip-field">
+          <span>M2 Rocket IP</span>
+          <input type="text" id="networkM2Ip" class="network-ip-input mono" placeholder="192.168.1.20" inputmode="decimal" autocomplete="off" />
+        </label>
+        <label class="network-ip-field">
+          <span>M900 Rocket IP</span>
+          <input type="text" id="networkM900Ip" class="network-ip-input mono" placeholder="192.168.1.21" inputmode="decimal" autocomplete="off" />
+        </label>
+        <div class="network-config-actions">
+          <button class="btn-primary" id="networkSaveBtn">Save</button>
+          <button class="btn-secondary" id="networkPollBtn">Poll Now</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="network-radio-grid">
+      <section class="section network-radio-card" id="networkCardM2">
+        <div class="section-header">
+          <span>M2 Rocket</span>
+          <span class="network-card-status" id="networkM2Status">UNCONFIGURED</span>
+        </div>
+        <div class="network-metric-hero">
+          <div>
+            <div class="network-hero-label">Latency</div>
+            <div class="network-hero-value mono"><span id="networkM2Latency">--</span><span> ms</span></div>
+          </div>
+          <div>
+            <div class="network-hero-label">Link Quality</div>
+            <div class="network-hero-value mono"><span id="networkM2Quality">--</span><span>%</span></div>
+          </div>
+        </div>
+        <div class="network-stat-list">
+          <div class="network-stat-row"><span>IP</span><strong class="mono" id="networkM2DisplayIp">--</strong></div>
+          <div class="network-stat-row"><span>Reachability</span><strong id="networkM2Reachable">--</strong></div>
+          <div class="network-stat-row"><span>Signal</span><strong class="mono" id="networkM2Signal">--</strong></div>
+          <div class="network-stat-row"><span>Noise Floor</span><strong class="mono" id="networkM2Noise">--</strong></div>
+          <div class="network-stat-row"><span>CCQ</span><strong class="mono" id="networkM2Ccq">--</strong></div>
+          <div class="network-stat-row"><span>TX Rate</span><strong class="mono" id="networkM2TxRate">--</strong></div>
+          <div class="network-stat-row"><span>RX Rate</span><strong class="mono" id="networkM2RxRate">--</strong></div>
+          <div class="network-stat-row"><span>Packet Errors</span><strong class="mono" id="networkM2Errors">--</strong></div>
+        </div>
+      </section>
+
+      <section class="section network-radio-card" id="networkCardM900">
+        <div class="section-header">
+          <span>M900 Rocket</span>
+          <span class="network-card-status" id="networkM900Status">UNCONFIGURED</span>
+        </div>
+        <div class="network-metric-hero">
+          <div>
+            <div class="network-hero-label">Latency</div>
+            <div class="network-hero-value mono"><span id="networkM900Latency">--</span><span> ms</span></div>
+          </div>
+          <div>
+            <div class="network-hero-label">Link Quality</div>
+            <div class="network-hero-value mono"><span id="networkM900Quality">--</span><span>%</span></div>
+          </div>
+        </div>
+        <div class="network-stat-list">
+          <div class="network-stat-row"><span>IP</span><strong class="mono" id="networkM900DisplayIp">--</strong></div>
+          <div class="network-stat-row"><span>Reachability</span><strong id="networkM900Reachable">--</strong></div>
+          <div class="network-stat-row"><span>Signal</span><strong class="mono" id="networkM900Signal">--</strong></div>
+          <div class="network-stat-row"><span>Noise Floor</span><strong class="mono" id="networkM900Noise">--</strong></div>
+          <div class="network-stat-row"><span>CCQ</span><strong class="mono" id="networkM900Ccq">--</strong></div>
+          <div class="network-stat-row"><span>TX Rate</span><strong class="mono" id="networkM900TxRate">--</strong></div>
+          <div class="network-stat-row"><span>RX Rate</span><strong class="mono" id="networkM900RxRate">--</strong></div>
+          <div class="network-stat-row"><span>Packet Errors</span><strong class="mono" id="networkM900Errors">--</strong></div>
+        </div>
+      </section>
+    </div>
+
+    <section class="section network-notes-section">
+      <div class="network-notes-grid">
+        <div class="network-note">
+          <span>SNMP</span>
+          <strong id="networkSnmpState">Checking</strong>
+        </div>
+        <div class="network-note">
+          <span>Community</span>
+          <strong class="mono" id="networkSnmpCommunity">--</strong>
+        </div>
+        <div class="network-note">
+          <span>Polling</span>
+          <strong>Every 3 seconds</strong>
+        </div>
+      </div>
+    </section>
+  </div><!-- /tab-network -->
 
 
   <!-- ── PAYLOAD ──────────────────────────────────────────────────── -->

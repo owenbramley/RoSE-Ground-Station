@@ -9,6 +9,9 @@ import logging
 import base64
 import shutil
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -82,7 +85,7 @@ try:
     from rclpy.node import Node
     from rclpy.executors import MultiThreadedExecutor
     from sensor_msgs.msg import Image, NavSatFix, BatteryState
-    from std_msgs.msg import Bool, Float32, UInt8MultiArray
+    from std_msgs.msg import Bool, Float32, String, UInt8MultiArray
     from std_msgs.msg import UInt8
     try:
         from gnc_interfaces.msg import SparkMotorTelemetry
@@ -113,7 +116,8 @@ except ImportError:
 class _DataStore:
     def __init__(self):
         self._lock = threading.RLock()
-        self.camera_frames: dict[int, Optional[bytes]] = {i: None for i in range(4)}
+        self.camera_frames: dict[str, Optional[bytes]] = {}
+        self.cameras: dict[str, dict] = {}
         self.telemetry: dict = {
             "soc": None,
             "current": None,
@@ -200,6 +204,9 @@ class _DataStore:
         }
         self.system: dict = {
             "jetson_temp": None,
+            "jetson_ip": None,
+            "rover_current_ip": None,
+            "rover_ips": [],
             "imu_online": False,
             "gnss_module_online": False,
             "uptime_s": 0,
@@ -210,13 +217,51 @@ class _DataStore:
 
     # --- thread-safe accessors ------------------------------------------------
 
-    def get_camera_frame(self, camera_id: int) -> Optional[bytes]:
+    def get_camera_frame(self, camera_id: str) -> Optional[bytes]:
         with self._lock:
-            return self.camera_frames.get(camera_id)
+            return self.camera_frames.get(str(camera_id))
 
-    def set_camera_frame(self, camera_id: int, data: bytes):
+    def set_camera_frame(self, camera_id: str, data: bytes):
         with self._lock:
-            self.camera_frames[camera_id] = data
+            self.camera_frames[str(camera_id)] = data
+            if str(camera_id) in self.cameras:
+                self.cameras[str(camera_id)]["last_frame_s"] = time.time()
+
+    def clear_camera_frame(self, camera_id: str):
+        with self._lock:
+            self.camera_frames[str(camera_id)] = None
+
+    def set_cameras(self, cameras: list[dict]):
+        with self._lock:
+            existing = self.cameras
+            merged: dict[str, dict] = {}
+            for camera in cameras:
+                camera_id = str(camera.get("id") or camera.get("device") or "")
+                if not camera_id:
+                    continue
+                prior = existing.get(camera_id, {})
+                merged[camera_id] = {
+                    **prior,
+                    **camera,
+                    "id": camera_id,
+                    "streaming": bool(prior.get("streaming", camera.get("streaming", False))),
+                    "port": prior.get("port", camera.get("port")),
+                    "last_frame_s": prior.get("last_frame_s"),
+                }
+                self.camera_frames.setdefault(camera_id, None)
+            self.cameras = merged
+
+    def update_camera(self, camera_id: str, **updates):
+        with self._lock:
+            camera_id = str(camera_id)
+            camera = dict(self.cameras.get(camera_id, {"id": camera_id, "label": camera_id}))
+            camera.update(updates)
+            self.cameras[camera_id] = camera
+            self.camera_frames.setdefault(camera_id, None)
+
+    def get_cameras(self) -> list[dict]:
+        with self._lock:
+            return [dict(v) for v in sorted(self.cameras.values(), key=lambda c: str(c.get("label") or c.get("id")))]
 
     def get_telemetry(self) -> dict:
         with self._lock:
@@ -230,13 +275,6 @@ class _DataStore:
         with self._lock:
             s = dict(self.system)
             s["uptime_s"] = int(time.time() - self._start_time)
-            jetson_temps = _read_jetson_temperatures()
-            s["jetson_temperatures"] = jetson_temps
-            if jetson_temps["cpu_c"] is not None:
-                s["jetson_cpu_temp"] = jetson_temps["cpu_c"]
-                s["jetson_temp"] = jetson_temps["cpu_c"]
-            if jetson_temps["gpu_c"] is not None:
-                s["jetson_gpu_temp"] = jetson_temps["gpu_c"]
             return s
 
     def is_payload_connected(self) -> bool:
@@ -350,6 +388,7 @@ class _DataStore:
                 {"topic": config.gnss_topic, "type": "sensor_msgs/NavSatFix", "purpose": "GNSS rover fix"},
                 {"topic": config.battery_topic, "type": "sensor_msgs/BatteryState", "purpose": "Battery telemetry"},
                 {"topic": config.jetson_temp_topic, "type": "std_msgs/Float32", "purpose": "Jetson temperature"},
+                {"topic": config.jetson_ip_topic, "type": "std_msgs/String", "purpose": "Jetson IP on the rover/ground-station network"},
                 {"topic": config.payload_temperature_topic, "type": "std_msgs/Float32", "purpose": "Payload Arduino temperature"},
                 {"topic": config.payload_moisture_topic, "type": "std_msgs/Float32", "purpose": "Payload Arduino moisture"},
                 {"topic": config.led_arduino_status_topic, "type": "std_msgs/Bool", "purpose": "LED Arduino online state"},
@@ -386,8 +425,32 @@ store = _DataStore()
 
 
 # ---------------------------------------------------------------------------
-# UDP/RTP H264 camera receiver
+# UDP/RTP H264 camera receiver and rover camera control
 # ---------------------------------------------------------------------------
+
+_receiver_lock = threading.RLock()
+_receiver_stop_events: dict[str, threading.Event] = {}
+_receiver_threads: dict[str, threading.Thread] = {}
+
+
+def _rover_request(method: str, path: str, payload: Optional[dict] = None, timeout: float = 3.0) -> dict:
+    url = config.rover_camera_service_url + path
+    data = None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        import json
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            raw = res.read().decode("utf-8")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Rover camera service unavailable at {url}: {e}") from e
+    if not raw:
+        return {}
+    import json
+    return json.loads(raw)
 
 def _gst_udp_h264_pipeline(port: int) -> str:
     return (
@@ -425,7 +488,7 @@ def _gst_udp_jpeg_command(port: int) -> list[str]:
     ]
 
 
-def _gst_subprocess_camera_loop(camera_id: int, port: int):
+def _gst_subprocess_camera_loop(camera_id: str, port: int, stop_event: threading.Event):
     if not shutil.which("gst-launch-1.0"):
         store.add_log("ERROR", "gst-launch-1.0 not found; install GStreamer to receive UDP cameras", "camera")
         time.sleep(5.0)
@@ -443,7 +506,7 @@ def _gst_subprocess_camera_loop(camera_id: int, port: int):
     buffer = bytearray()
     last_frame_s = time.time()
     try:
-        while proc.poll() is None:
+        while proc.poll() is None and not stop_event.is_set():
             chunk = proc.stdout.read(4096)
             if not chunk:
                 time.sleep(0.01)
@@ -478,20 +541,21 @@ def _gst_subprocess_camera_loop(camera_id: int, port: int):
             proc.communicate()
 
 
-def _udp_camera_loop(camera_id: int, port: int):
-    label = config.camera_labels[camera_id] if camera_id < len(config.camera_labels) else str(camera_id)
+def _udp_camera_loop(camera_id: str, port: int, stop_event: threading.Event):
+    camera = next((c for c in store.get_cameras() if c.get("id") == str(camera_id)), {})
+    label = camera.get("label") or str(camera_id)
     store.add_log("INFO", f"Opening UDP/RTP camera {camera_id} ({label}) on port {port}", "camera")
 
-    while True:
+    while not stop_event.is_set():
         cap = cv2.VideoCapture(_gst_udp_h264_pipeline(port), cv2.CAP_GSTREAMER)
         if not cap.isOpened():
             store.add_log("WARN", f"OpenCV GStreamer receiver unavailable for camera {camera_id}; trying gst-launch", "camera")
-            _gst_subprocess_camera_loop(camera_id, port)
+            _gst_subprocess_camera_loop(str(camera_id), port, stop_event)
             time.sleep(2.0)
             continue
 
         store.add_log("INFO", f"Camera {camera_id} receiving UDP/RTP H264 on port {port}", "camera")
-        while True:
+        while not stop_event.is_set():
             ok, frame = cap.read()
             if not ok or frame is None:
                 store.add_log("WARN", f"Camera {camera_id} stream lost on port {port}; reconnecting", "camera")
@@ -501,17 +565,45 @@ def _udp_camera_loop(camera_id: int, port: int):
 
             ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, config.jpeg_quality])
             if ok:
-                store.set_camera_frame(camera_id, buf.tobytes())
+                store.set_camera_frame(str(camera_id), buf.tobytes())
+        cap.release()
+    store.clear_camera_frame(str(camera_id))
+    store.add_log("INFO", f"Camera {camera_id} receiver stopped", "camera")
 
 
-def _start_udp_camera_receivers():
+def _camera_port(camera_id: str) -> int:
+    cameras = store.get_cameras()
+    ids = [str(c.get("id")) for c in cameras]
+    try:
+        index = ids.index(str(camera_id))
+    except ValueError:
+        index = 0
     if not config.camera_udp_ports:
-        store.add_log("WARN", "GS_CAMERA_SOURCE=udp but no UDP ports configured", "camera")
-        return
+        raise RuntimeError("GS_CAMERA_SOURCE=udp but no UDP ports configured")
+    if index >= len(config.camera_udp_ports):
+        raise RuntimeError("Not enough GS_CAMERA_UDP_PORTS configured for discovered cameras")
+    return int(config.camera_udp_ports[index])
 
-    for camera_id, port in enumerate(config.camera_udp_ports[:4]):
-        t = threading.Thread(target=_udp_camera_loop, args=(camera_id, int(port)), daemon=True)
+
+def _start_udp_camera_receiver(camera_id: str, port: int):
+    with _receiver_lock:
+        prior = _receiver_stop_events.get(str(camera_id))
+        thread = _receiver_threads.get(str(camera_id))
+        if prior and thread and thread.is_alive():
+            return
+        stop_event = threading.Event()
+        _receiver_stop_events[str(camera_id)] = stop_event
+        t = threading.Thread(target=_udp_camera_loop, args=(str(camera_id), int(port), stop_event), daemon=True)
+        _receiver_threads[str(camera_id)] = t
         t.start()
+
+
+def _stop_udp_camera_receiver(camera_id: str):
+    with _receiver_lock:
+        stop_event = _receiver_stop_events.pop(str(camera_id), None)
+        _receiver_threads.pop(str(camera_id), None)
+    if stop_event:
+        stop_event.set()
 
 
 # ---------------------------------------------------------------------------
@@ -526,11 +618,12 @@ if ROS2_AVAILABLE:
 
             if config.camera_source == "ros2":
                 for i, topic in enumerate(config.camera_topics):
-                    self.create_subscription(Image, topic, self._make_cam_cb(i), 5)
+                    self.create_subscription(Image, topic, self._make_cam_cb(f"ros{i}"), 5)
 
             self.create_subscription(NavSatFix, config.gnss_topic, self._gnss_cb, 10)
             self.create_subscription(BatteryState, config.battery_topic, self._battery_cb, 10)
             self.create_subscription(Float32, config.jetson_temp_topic, self._jetson_temp_cb, 5)
+            self.create_subscription(String, config.jetson_ip_topic, self._jetson_ip_cb, 5)
             self.create_subscription(Float32, config.payload_temperature_topic, self._payload_temperature_cb, 5)
             self.create_subscription(Float32, config.payload_moisture_topic, self._payload_moisture_cb, 5)
             self.create_subscription(Bool, config.led_arduino_status_topic, self._led_arduino_status_cb, 5)
@@ -560,7 +653,7 @@ if ROS2_AVAILABLE:
             self._arm_clear_faults_pub = self.create_publisher(UInt8, config.arm_clear_faults_topic, 10)
             self.create_timer(1.0, self._payload_graph_health_cb)
 
-        def _make_cam_cb(self, cam_id: int):
+        def _make_cam_cb(self, cam_id: str):
             def cb(msg: Image):
                 try:
                     if CV_BRIDGE_AVAILABLE:
@@ -597,6 +690,13 @@ if ROS2_AVAILABLE:
         def _jetson_temp_cb(self, msg: Float32):
             with store._lock:
                 store.system["jetson_temp"] = round(msg.data, 1)
+
+        def _jetson_ip_cb(self, msg: String):
+            ip = str(msg.data or "").strip()
+            with store._lock:
+                store.system["jetson_ip"] = ip or None
+                store.system["rover_current_ip"] = ip or None
+                store.system["rover_ips"] = [ip] if ip else []
 
         def _payload_temperature_cb(self, msg: Float32):
             with store._lock:
@@ -724,9 +824,7 @@ if ROS2_AVAILABLE:
 class ROS2Bridge:
     def __init__(self):
         self._node: Optional["_RoverNode"] = None  # type: ignore[name-defined]
-        if config.camera_source == "udp":
-            _start_udp_camera_receivers()
-        elif config.camera_source not in ("ros2", "udp"):
+        if config.camera_source not in ("ros2", "udp"):
             store.add_log("ERROR", f"Unknown GS_CAMERA_SOURCE={config.camera_source!r}; expected 'udp' or 'ros2'", "camera")
         if ROS2_AVAILABLE:
             self._init_ros2()
@@ -747,8 +845,86 @@ class ROS2Bridge:
 
     # --- data accessors -------------------------------------------------------
 
-    def get_camera_frame(self, camera_id: int) -> Optional[bytes]:
-        return store.get_camera_frame(camera_id)
+    def get_camera_frame(self, camera_id: str) -> Optional[bytes]:
+        return store.get_camera_frame(str(camera_id))
+
+    def get_cameras(self) -> list[dict]:
+        return store.get_cameras()
+
+    def refresh_cameras(self) -> list[dict]:
+        if config.camera_source == "ros2":
+            cameras = []
+            for i, topic in enumerate(config.camera_topics):
+                label = config.camera_labels[i] if i < len(config.camera_labels) else topic.rsplit("/", 1)[-1]
+                cameras.append({"id": f"ros{i}", "label": label, "topic": topic, "source": "ros2"})
+            store.set_cameras(cameras)
+            return store.get_cameras()
+        res = _rover_request("GET", "/cameras", timeout=5.0)
+        cameras = res.get("cameras", [])
+        store.set_cameras(cameras)
+        store.add_log("INFO", f"Discovered {len(cameras)} rover camera(s)", "camera")
+        return store.get_cameras()
+
+    def start_camera(self, camera_id: str, client_ip: str) -> dict:
+        camera_id = str(camera_id)
+        if config.camera_source == "ros2":
+            store.update_camera(camera_id, streaming=True)
+            return next((c for c in store.get_cameras() if c.get("id") == camera_id), {"id": camera_id})
+        port = _camera_port(camera_id)
+        payload = {
+            "client_ip": client_ip,
+            "port": port,
+            "max_fps": config.rover_camera_max_fps,
+            "max_width": config.rover_camera_max_width,
+            "max_height": config.rover_camera_max_height,
+            "bitrate": config.rover_camera_bitrate,
+        }
+        res = _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id)}/start", payload, timeout=8.0)
+        _start_udp_camera_receiver(camera_id, port)
+        camera = res.get("camera", {"id": camera_id})
+        store.update_camera(camera_id, **camera, port=port, streaming=True)
+        store.add_log("INFO", f"Started rover camera {camera_id} on UDP port {port}", "camera")
+        return next((c for c in store.get_cameras() if c.get("id") == camera_id), {"id": camera_id})
+
+    def stop_camera(self, camera_id: str) -> dict:
+        camera_id = str(camera_id)
+        if config.camera_source == "udp":
+            try:
+                _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id)}/stop", {}, timeout=3.0)
+            except RuntimeError as e:
+                store.add_log("WARN", str(e), "camera")
+            _stop_udp_camera_receiver(camera_id)
+        store.update_camera(camera_id, streaming=False)
+        store.clear_camera_frame(camera_id)
+        store.add_log("INFO", f"Stopped camera {camera_id}", "camera")
+        return next((c for c in store.get_cameras() if c.get("id") == camera_id), {"id": camera_id, "streaming": False})
+
+    def capture_camera_still(self, camera_id: str) -> dict:
+        camera_id = str(camera_id)
+        paused_ids = [str(c.get("id")) for c in store.get_cameras() if c.get("streaming")]
+        for paused_id in paused_ids:
+            self.stop_camera(paused_id)
+
+        if config.camera_source == "udp":
+            payload = {
+                "max_width": config.rover_camera_still_max_width,
+                "max_height": config.rover_camera_still_max_height,
+            }
+            res = _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id)}/still", payload, timeout=15.0)
+            image = res.get("image", {})
+        else:
+            data = store.get_camera_frame(camera_id)
+            if not data:
+                raise RuntimeError("No camera frame available for still capture")
+            image = {
+                "camera_id": camera_id,
+                "image_data_url": "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii"),
+                "content_type": "image/jpeg",
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        store.add_log("INFO", f"Captured HD still from camera {camera_id}; paused {len(paused_ids)} stream(s)", "camera")
+        return {"image": image, "paused_camera_ids": paused_ids}
 
     def get_telemetry(self) -> dict:
         return store.get_telemetry()
@@ -757,10 +933,35 @@ class ROS2Bridge:
         return store.get_gnss()
 
     def get_system(self) -> dict:
-        return store.get_system()
+        system = store.get_system()
+        if config.camera_source == "udp":
+            try:
+                rover_system = _rover_request("GET", "/system", timeout=2.0)
+            except RuntimeError:
+                rover_system = {}
+            if rover_system:
+                system["rover_system"] = rover_system
+                system["jetson_cpu_temp"] = rover_system.get("rover_cpu_temp")
+                system["jetson_gpu_temp"] = rover_system.get("rover_gpu_temp")
+                system["jetson_temp"] = rover_system.get("rover_cpu_temp")
+                system["rover_current_ip"] = rover_system.get("rover_current_ip")
+                system["rover_ips"] = rover_system.get("rover_ips", [])
+        else:
+            system["jetson_cpu_temp"] = system.get("jetson_temp")
+            system["rover_current_ip"] = system.get("jetson_ip")
+            system["rover_ips"] = [system["jetson_ip"]] if system.get("jetson_ip") else []
+        return system
 
     def get_jetson_temperatures(self) -> dict:
-        return _read_jetson_temperatures()
+        if config.camera_source == "udp":
+            return _rover_request("GET", "/system", timeout=2.0)
+        system = store.get_system()
+        return {
+            "rover_cpu_temp": system.get("jetson_temp"),
+            "rover_gpu_temp": None,
+            "rover_current_ip": None,
+            "rover_ips": [],
+        }
 
     def is_payload_connected(self) -> bool:
         return store.is_payload_connected()
@@ -791,6 +992,9 @@ class ROS2Bridge:
 
     def get_motor_telemetry(self) -> dict:
         return store.get_motor_telemetry()
+
+    def get_rover_storage(self) -> dict:
+        return _rover_request("GET", "/storage", timeout=8.0)
 
     def get_logs_since(self, since_id: int = 0) -> list:
         return store.get_logs_since(since_id)
@@ -858,8 +1062,8 @@ class ROS2Bridge:
         self._require_node().publish_camera360_capture(command_bytes)
 
         frames = []
-        for camera_id in range(4):
-            data = store.get_camera_frame(camera_id)
+        for camera in store.get_cameras():
+            data = store.get_camera_frame(str(camera.get("id")))
             if not data:
                 continue
             arr = np.frombuffer(data, dtype=np.uint8)

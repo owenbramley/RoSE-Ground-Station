@@ -14,28 +14,40 @@ class Config:
     host: str = "0.0.0.0"
     port: int = field(default_factory=lambda: int(os.environ.get("GS_PORT", "8000")))
 
-    # ROS2 topics — cameras
+    # ROS2 topics — cameras. Defaults are intentionally empty; the UI discovers
+    # physical cameras from the rover service instead of assuming fixed names.
     camera_topics: list = field(default_factory=lambda: [
-        "/camera/front/image_raw",
-        "/camera/rear/image_raw",
-        "/camera/left/image_raw",
-        "/camera/right/image_raw",
+        topic.strip()
+        for topic in os.environ.get("GS_CAMERA_TOPICS", "").split(",")
+        if topic.strip()
     ])
     camera_labels: list = field(default_factory=lambda: [
-        "FRONT", "REAR", "LEFT", "RIGHT"
+        label.strip()
+        for label in os.environ.get("GS_CAMERA_LABELS", "").split(",")
+        if label.strip()
     ])
     camera_source: str = field(default_factory=lambda: os.environ.get("GS_CAMERA_SOURCE", "udp").lower())
     camera_udp_ports: list[int] = field(default_factory=lambda: [
         int(port.strip())
-        for port in os.environ.get("GS_CAMERA_UDP_PORTS", "5000,5001,5002,5003").split(",")
+        for port in os.environ.get("GS_CAMERA_UDP_PORTS", "5000,5001,5002,5003,5004,5005,5006,5007").split(",")
         if port.strip()
     ])
+    rover_camera_service_url: str = field(
+        default_factory=lambda: os.environ.get("GS_ROVER_CAMERA_SERVICE_URL", "http://192.168.0.14:8765").rstrip("/")
+    )
+    rover_camera_max_fps: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_FPS", "15")))
+    rover_camera_max_width: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_WIDTH", "640")))
+    rover_camera_max_height: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_HEIGHT", "480")))
+    rover_camera_bitrate: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_BITRATE", "800")))
+    rover_camera_still_max_width: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_STILL_MAX_WIDTH", "1920")))
+    rover_camera_still_max_height: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_STILL_MAX_HEIGHT", "1080")))
 
     # ROS2 topics — sensors
     gnss_topic: str = "/gnss/fix"
     battery_topic: str = "/battery/state"
     imu_topic: str = "/imu/data"
     jetson_temp_topic: str = "/jetson/temperature"
+    jetson_ip_topic: str = "/jetson/ip"
     payload_temperature_topic: str = "/payload/arduino/temperature"
     payload_moisture_topic: str = "/payload/arduino/moisture"
     led_arduino_status_topic: str = "/led_arduino/status"
@@ -54,6 +66,13 @@ class Config:
     # ROS2 topics — radio link health
     link_24ghz_topic: str = "/comms/link_24ghz"
     link_900mhz_topic: str = "/comms/link_900mhz"
+
+    # Ground-station network radio polling
+    network_config_path: str = field(
+        default_factory=lambda: os.environ.get("GS_NETWORK_CONFIG_PATH", "data/network_config.json")
+    )
+    rocket_snmp_community: str = field(default_factory=lambda: os.environ.get("GS_ROCKET_SNMP_COMMUNITY", "public"))
+    rocket_poll_timeout_s: float = field(default_factory=lambda: float(os.environ.get("GS_ROCKET_POLL_TIMEOUT_S", "1.2")))
 
     # ROS2 topics — control
     estop_topic: str = "/estop"

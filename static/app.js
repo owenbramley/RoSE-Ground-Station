@@ -13,6 +13,10 @@ const state = {
   estopActive: false,
   augerOn: false,
   hiddenCameras: new Set(),
+  visibleCameras: new Set(),
+  cameraVisibilitySaved: false,
+  cameras: [],
+  stillPausedCameras: [],
   warnings: {
     soc:  { warning: 30, critical: 15 },
     cur:  { warning: 20, critical: 30 },
@@ -25,6 +29,18 @@ const state = {
   logLevel:  'ALL',
   alertLogKeys: new Map(),
   gsUrl: '',
+  missionMode: 'default',
+  dashboardTimer: {
+    elapsedMs: 0,
+    running: false,
+    laps: [],
+    serverTs: 0,
+    receivedAt: 0,
+  },
+  network: {
+    pollTimer: null,
+    saving: false,
+  },
 };
 
 // ══════════════════════════════════════════════════════════════
@@ -159,6 +175,7 @@ function fmtTime(isoStr) {
 }
 
 function asFiniteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
 }
@@ -356,6 +373,7 @@ function handleTelemetryMsg(msg) {
   updateLifeAnalysis(msg.life_analysis || {});
   updateLedController(msg.led_controller || {});
   updateMotorTelemetry(msg.motor_telemetry || {});
+  updateDashboardTimer(msg.dashboard_timer || {});
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -526,6 +544,17 @@ function closeCapture360Modal() {
   document.getElementById('capture360Modal').classList.add('hidden');
 }
 
+async function closeCameraStillModal() {
+  document.getElementById('cameraStillModal')?.classList.add('hidden');
+  const paused = [...(state.stillPausedCameras || [])];
+  state.stillPausedCameras = [];
+  for (const id of paused) {
+    if (state.visibleCameras.has(String(id))) {
+      await showCamera(String(id), { persist: false, quiet: true });
+    }
+  }
+}
+
 async function capture360Image() {
   const modal = document.getElementById('capture360Modal');
   const status = document.getElementById('capture360Status');
@@ -553,88 +582,202 @@ async function capture360Image() {
   }
 }
 
+async function captureCameraStill(id) {
+  id = String(id);
+  const modal = document.getElementById('cameraStillModal');
+  const title = document.getElementById('cameraStillTitle');
+  const status = document.getElementById('cameraStillStatus');
+  const img = document.getElementById('cameraStillImg');
+  const placeholder = document.getElementById('cameraStillPlaceholder');
+  const download = document.getElementById('cameraStillDownload');
+
+  modal?.classList.remove('hidden');
+  if (title) title.textContent = `${cameraName(id)} Still`;
+  if (status) status.textContent = 'Pausing streams and capturing HD still...';
+  if (img) {
+    img.classList.add('hidden');
+    img.removeAttribute('src');
+  }
+  placeholder?.classList.remove('hidden');
+  download?.classList.add('hidden');
+
+  try {
+    const res = await apiFetch(`/api/camera/${encodeURIComponent(id)}/still`, { method: 'POST' });
+    const image = res.image || {};
+    state.stillPausedCameras = (res.paused_camera_ids || []).map(String);
+    if (!image.image_data_url) throw new Error('No image returned from rover');
+    img.src = image.image_data_url;
+    img.classList.remove('hidden');
+    placeholder?.classList.add('hidden');
+    const filename = `${cameraName(id).replace(/[^a-z0-9_-]+/gi, '_')}_${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+    download.href = image.image_data_url;
+    download.download = filename;
+    download.classList.remove('hidden');
+    status.textContent = `Captured ${image.width || '--'}x${image.height || '--'} still. Streams resume when this popup closes.`;
+  } catch (err) {
+    status.textContent = `Still capture failed: ${err.message}`;
+    showToast('error', 'Still Capture Failed', err.message);
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 // CAMERA FEEDS — src set after auth so token can be appended
 // ══════════════════════════════════════════════════════════════
 
 function initCameras() {
   try {
-    const saved = JSON.parse(localStorage.getItem('rose_hidden_cameras') || '[]');
-    state.hiddenCameras = new Set(saved.map(Number).filter(n => Number.isInteger(n) && n >= 0 && n < 4));
+    const raw = localStorage.getItem('rose_visible_cameras');
+    state.cameraVisibilitySaved = raw !== null;
+    const saved = JSON.parse(raw || '[]');
+    state.visibleCameras = new Set(saved.map(String));
   } catch (_) {
-    state.hiddenCameras = new Set();
+    state.visibleCameras = new Set();
+    state.cameraVisibilitySaved = false;
   }
 
-  for (let i = 0; i < 4; i++) {
-    const img = document.getElementById(`camImg${i}`);
-    const err = document.getElementById(`camErr${i}`);
-
-    // Set src with token embedded as query param (img can't send headers)
-    img.src = withToken(`/api/camera/${i}`);
-
-    img.addEventListener('error', () => {
-      img.classList.add('hidden');
-      err.classList.remove('hidden');
-      setTimeout(() => retryCam(i), 3000);
-    });
-    img.addEventListener('load', () => {
-      img.classList.remove('hidden');
-      err.classList.add('hidden');
-    });
-  }
-
-  document.querySelectorAll('.camera-hide-btn').forEach(btn => {
-    btn.addEventListener('click', () => hideCamera(Number(btn.dataset.cameraId)));
-  });
+  document.getElementById('refreshCamerasBtn')?.addEventListener('click', () => refreshCameras(true));
   document.getElementById('showAllCamerasBtn')?.addEventListener('click', showAllCameras);
+  document.getElementById('closeCameraStillModal')?.addEventListener('click', closeCameraStillModal);
+  refreshCameras(false).catch(() => renderCameraGrid());
+}
+
+async function refreshCameras(force = true) {
+  let res;
+  try {
+    res = force
+      ? await apiFetch('/api/cameras/refresh', { method: 'POST' })
+      : await apiFetch('/api/cameras');
+  } catch (err) {
+    if (force) showToast('error', 'Camera Refresh Failed', err.message);
+    throw err;
+  }
+  state.cameras = res.cameras || [];
+  const known = new Set(state.cameras.map(cam => String(cam.id)));
+  state.hiddenCameras = new Set(state.cameras.map(cam => String(cam.id)).filter(id => !state.visibleCameras.has(id)));
+  state.visibleCameras = new Set([...state.visibleCameras].filter(id => known.has(id)));
+  renderCameraGrid();
   renderCameraVisibility();
 }
 
 function retryCam(id) {
-  const img = document.getElementById(`camImg${id}`);
-  const err = document.getElementById(`camErr${id}`);
-  img.src = withToken(`/api/camera/${id}`) + `&_=${Date.now()}`;
+  const safeId = cssSafeId(id);
+  const img = document.getElementById(`camImg-${safeId}`);
+  const err = document.getElementById(`camErr-${safeId}`);
+  if (!img || !err) return;
+  img.src = withToken(`/api/camera/${encodeURIComponent(id)}`) + `&_=${Date.now()}`;
   img.classList.remove('hidden');
   err.classList.add('hidden');
 }
 
 function cameraName(id) {
-  return ['Front', 'Rear', 'Left', 'Right'][id] || `Camera ${id}`;
+  const cam = state.cameras.find(c => String(c.id) === String(id));
+  return cam?.label || cam?.device || `Camera ${id}`;
 }
 
 function saveHiddenCameras() {
-  localStorage.setItem('rose_hidden_cameras', JSON.stringify([...state.hiddenCameras]));
+  state.cameraVisibilitySaved = true;
+  localStorage.setItem('rose_visible_cameras', JSON.stringify([...state.visibleCameras]));
 }
 
-function hideCamera(id) {
-  if (!Number.isInteger(id)) return;
+async function hideCamera(id) {
+  id = String(id);
   state.hiddenCameras.add(id);
+  state.visibleCameras.delete(id);
   saveHiddenCameras();
   renderCameraVisibility();
+  try {
+    await apiFetch(`/api/camera/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+  } catch (err) {
+    showToast('warn', 'Camera Stop Failed', err.message);
+  }
 }
 
-function showCamera(id) {
+async function showCamera(id, options = {}) {
+  id = String(id);
   state.hiddenCameras.delete(id);
-  saveHiddenCameras();
+  state.visibleCameras.add(id);
+  if (options.persist !== false) saveHiddenCameras();
   renderCameraVisibility();
-  retryCam(id);
+  try {
+    await apiFetch(`/api/camera/${encodeURIComponent(id)}/start`, { method: 'POST' });
+    retryCam(id);
+  } catch (err) {
+    if (!options.quiet) showToast('error', 'Camera Start Failed', err.message);
+  }
 }
 
 function showAllCameras() {
   state.hiddenCameras.clear();
+  state.visibleCameras = new Set(state.cameras.map(cam => String(cam.id)));
   saveHiddenCameras();
   renderCameraVisibility();
-  for (let i = 0; i < 4; i++) retryCam(i);
+  state.cameras.forEach(cam => showCamera(String(cam.id)));
+}
+
+function cssSafeId(id) {
+  return String(id).replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function renderCameraGrid() {
+  const grid = document.getElementById('cameraGrid');
+  if (!grid) return;
+  if (!state.cameras.length) {
+    grid.innerHTML = '<div class="camera-empty">Press Refresh Cameras to discover connected rover cameras.</div>';
+    return;
+  }
+  grid.innerHTML = state.cameras.map(cam => {
+    const id = String(cam.id);
+    const safeId = cssSafeId(id);
+    return `
+      <div class="camera-cell" id="cam-${safeId}" data-camera-id="${escHtml(id)}">
+        <div class="camera-label">${escHtml(cameraName(id))}</div>
+        <div class="camera-tools">
+          <button class="camera-still-btn" data-camera-id="${escHtml(id)}" title="Capture HD still from ${escHtml(cameraName(id))}">Still</button>
+          <button class="camera-hide-btn" data-camera-id="${escHtml(id)}" title="Hide ${escHtml(cameraName(id))} camera">Hide</button>
+        </div>
+        <img class="camera-img" id="camImg-${safeId}" alt="${escHtml(cameraName(id))} camera" />
+        <div class="camera-error hidden" id="camErr-${safeId}">
+          <span class="cam-err-icon">⊗</span>
+          <span>Feed unavailable</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+  grid.querySelectorAll('.camera-hide-btn').forEach(btn => {
+    btn.addEventListener('click', () => hideCamera(btn.dataset.cameraId));
+  });
+  grid.querySelectorAll('.camera-still-btn').forEach(btn => {
+    btn.addEventListener('click', () => captureCameraStill(btn.dataset.cameraId));
+  });
+  state.cameras.forEach(cam => {
+    const id = String(cam.id);
+    const safeId = cssSafeId(id);
+    const img = document.getElementById(`camImg-${safeId}`);
+    const err = document.getElementById(`camErr-${safeId}`);
+    if (!img || !err) return;
+    img.addEventListener('error', () => {
+      img.classList.add('hidden');
+      err.classList.remove('hidden');
+      if (!state.hiddenCameras.has(id)) setTimeout(() => retryCam(id), 3000);
+    });
+    img.addEventListener('load', () => {
+      img.classList.remove('hidden');
+      err.classList.add('hidden');
+    });
+    if (!state.hiddenCameras.has(id)) showCamera(id);
+  });
 }
 
 function renderCameraVisibility() {
-  for (let i = 0; i < 4; i++) {
-    const cell = document.getElementById(`cam${i}`);
-    if (cell) cell.classList.toggle('camera-hidden', state.hiddenCameras.has(i));
-  }
+  state.cameras.forEach(cam => {
+    const id = String(cam.id);
+    const cell = document.getElementById(`cam-${cssSafeId(id)}`);
+    if (cell) cell.classList.toggle('camera-hidden', state.hiddenCameras.has(id));
+  });
   const dock = document.getElementById('hiddenCameraDock');
   if (!dock) return;
-  const hidden = [...state.hiddenCameras].sort((a, b) => a - b);
+  const known = new Set(state.cameras.map(cam => String(cam.id)));
+  const hidden = [...state.hiddenCameras].filter(id => known.has(id)).sort();
   dock.classList.toggle('hidden', hidden.length === 0);
   dock.innerHTML = hidden.map(id => `
     <button class="hidden-camera-btn" data-camera-id="${id}" title="Show ${escHtml(cameraName(id))} camera">
@@ -642,8 +785,130 @@ function renderCameraVisibility() {
     </button>
   `).join('');
   dock.querySelectorAll('.hidden-camera-btn').forEach(btn => {
-    btn.addEventListener('click', () => showCamera(Number(btn.dataset.cameraId)));
+    btn.addEventListener('click', () => showCamera(btn.dataset.cameraId));
   });
+}
+
+// ══════════════════════════════════════════════════════════════
+// DASHBOARD MODE BUTTONS + SYNCED TIMER
+// ══════════════════════════════════════════════════════════════
+
+const MISSION_TAB_SETS = {
+  default: null,
+  equipment: new Set(['dashboard', 'cameras']),
+  delivery: new Set(['dashboard', 'cameras']),
+  autonav: new Set(['dashboard', 'cameras', 'logs', 'files', 'system', 'network']),
+};
+
+function initDashboardControls() {
+  state.missionMode = localStorage.getItem('rose_mission_mode') || 'default';
+  applyMissionMode(state.missionMode);
+
+  document.querySelectorAll('.mission-mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const mode = btn.dataset.missionMode;
+      state.missionMode = state.missionMode === mode ? 'default' : mode;
+      localStorage.setItem('rose_mission_mode', state.missionMode);
+      applyMissionMode(state.missionMode);
+    });
+  });
+
+  document.getElementById('timerPauseBtn')?.addEventListener('click', () => {
+    sendTimerAction(state.dashboardTimer.running ? 'pause' : 'start');
+  });
+  document.getElementById('timerStopBtn')?.addEventListener('click', () => sendTimerAction('stop'));
+  document.getElementById('timerResetBtn')?.addEventListener('click', () => sendTimerAction('reset'));
+  document.getElementById('timerLapBtn')?.addEventListener('click', () => sendTimerAction('lap'));
+
+  refreshDashboardTimer().catch(() => {});
+  setInterval(renderDashboardTimer, 120);
+}
+
+function applyMissionMode(mode) {
+  const allowed = MISSION_TAB_SETS[mode] || null;
+  document.querySelectorAll('.mission-mode-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.missionMode === mode);
+  });
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    const visible = !allowed || allowed.has(btn.dataset.tab);
+    btn.classList.toggle('hidden', !visible);
+  });
+  const active = document.querySelector('.tab-btn.active')?.dataset.tab;
+  if (allowed && active && !allowed.has(active)) activateTab('dashboard');
+}
+
+function formatTimer(ms) {
+  const totalCentis = Math.max(0, Math.floor(ms / 10));
+  const centis = totalCentis % 100;
+  const totalSeconds = Math.floor(totalCentis / 100);
+  const seconds = totalSeconds % 60;
+  const minutes = Math.floor(totalSeconds / 60) % 60;
+  const hours = Math.floor(totalSeconds / 3600);
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(centis).padStart(2, '0')}`;
+  }
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(centis).padStart(2, '0')}`;
+}
+
+function currentTimerElapsed() {
+  const timer = state.dashboardTimer;
+  if (!timer.running) return timer.elapsedMs;
+  return timer.elapsedMs + (Date.now() - timer.receivedAt);
+}
+
+function updateDashboardTimer(timer) {
+  if (!timer || typeof timer.elapsed_ms !== 'number') return;
+  state.dashboardTimer = {
+    elapsedMs: timer.elapsed_ms,
+    running: !!timer.running,
+    laps: Array.isArray(timer.laps) ? timer.laps : [],
+    serverTs: Number(timer.server_ts || 0) * 1000,
+    receivedAt: Date.now(),
+  };
+  renderDashboardTimer();
+}
+
+function renderDashboardTimer() {
+  const display = document.getElementById('dashboardTimerDisplay');
+  if (!display) return;
+  const timer = state.dashboardTimer;
+  display.textContent = formatTimer(currentTimerElapsed());
+
+  const stateEl = document.getElementById('timerSyncState');
+  if (stateEl) {
+    stateEl.textContent = timer.running ? 'RUNNING' : 'PAUSED';
+    stateEl.className = `timer-sync-state ${timer.running ? 'running' : 'paused'}`;
+  }
+
+  const pauseBtn = document.getElementById('timerPauseBtn');
+  if (pauseBtn) pauseBtn.textContent = timer.running ? 'Pause' : 'Start';
+
+  const laps = document.getElementById('timerLaps');
+  if (!laps) return;
+  laps.innerHTML = timer.laps.slice().reverse().map(lap => `
+    <div class="timer-lap">
+      <span>Lap ${escHtml(lap.index ?? '')}</span>
+      <strong>${formatTimer(Number(lap.elapsed_ms || 0))}</strong>
+    </div>
+  `).join('');
+}
+
+async function refreshDashboardTimer() {
+  const res = await apiFetch('/api/dashboard/timer');
+  updateDashboardTimer(res.timer || {});
+}
+
+async function sendTimerAction(action) {
+  try {
+    const res = await apiFetch('/api/dashboard/timer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    updateDashboardTimer(res.timer || {});
+  } catch (err) {
+    showToast('error', 'Timer Sync Failed', err.message);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -845,35 +1110,93 @@ function initLogs() {
 // ══════════════════════════════════════════════════════════════
 
 function initFiles() {
-  document.getElementById('getFilesBtn').addEventListener('click', async () => {
-    const btn    = document.getElementById('getFilesBtn');
-    const status = document.getElementById('filesStatus');
-    btn.disabled = true;
-    document.getElementById('getFilesBtnIcon').textContent = '↻';
-    status.textContent = '';
-    status.className = 'files-status';
+  document.getElementById('getFilesBtn')?.addEventListener('click', refreshUsbFiles);
+  document.getElementById('refreshFilesBtn')?.addEventListener('click', refreshUsbFiles);
+}
 
-    try {
-      const data = await apiFetch('/api/files');
-      status.textContent = JSON.stringify(data);
-      status.className = 'files-status ok';
-    } catch (err) {
-      const isNoStorage = err.message.includes('503')
-        || err.message.toLowerCase().includes('no_storage')
-        || err.message.toLowerCase().includes('no external');
-      if (isNoStorage) {
-        status.textContent = 'No external storage device detected.';
-        status.className = 'files-status';
-      } else {
-        status.textContent = `Error: ${err.message}`;
-        status.className = 'files-status error';
-        showToast('error', 'Files API Error', err.message);
-      }
-    } finally {
-      btn.disabled = false;
-      document.getElementById('getFilesBtnIcon').textContent = '⇓';
+async function refreshUsbFiles() {
+  const btn = document.getElementById('getFilesBtn');
+  const refreshBtn = document.getElementById('refreshFilesBtn');
+  const status = document.getElementById('filesStatus');
+  const icon = document.getElementById('getFilesBtnIcon');
+  const viewer = document.getElementById('textFileViewer');
+  const content = document.getElementById('textFileContent');
+  const meta = document.getElementById('textFileMeta');
+  const devicesEl = document.getElementById('usbDeviceList');
+  if (btn) btn.disabled = true;
+  if (refreshBtn) refreshBtn.disabled = true;
+  if (icon) icon.textContent = '↻';
+  if (status) {
+    status.textContent = 'Refreshing Jetson USB storage...';
+    status.className = 'files-status';
+  }
+  if (viewer) viewer.classList.add('hidden');
+  if (content) content.textContent = '';
+  if (meta) meta.textContent = '';
+  if (devicesEl) devicesEl.innerHTML = '';
+
+  try {
+    const data = await apiFetch('/api/files');
+    renderUsbFiles(data);
+  } catch (err) {
+    const isNoStorage = err.message.includes('503')
+      || err.message.toLowerCase().includes('no_storage')
+      || err.message.toLowerCase().includes('no external');
+    if (isNoStorage) {
+      status.textContent = 'No external storage device detected on the Jetson.';
+      status.className = 'files-status';
+    } else {
+      status.textContent = `Error: ${err.message}`;
+      status.className = 'files-status error';
+      showToast('error', 'USB Refresh Error', err.message);
     }
-  });
+  } finally {
+    if (btn) btn.disabled = false;
+    if (refreshBtn) refreshBtn.disabled = false;
+    if (icon) icon.textContent = '⇓';
+  }
+}
+
+function renderUsbFiles(data) {
+  const status = document.getElementById('filesStatus');
+  const devicesEl = document.getElementById('usbDeviceList');
+  const viewer = document.getElementById('textFileViewer');
+  const content = document.getElementById('textFileContent');
+  const meta = document.getElementById('textFileMeta');
+  const devices = data.devices || [];
+  const selected = data.selected_file || null;
+  const text = data.content ?? '';
+
+  const fileCount = devices.reduce((sum, device) => sum + (device.text_files || []).length, 0);
+  status.textContent = `${devices.length} USB device${devices.length === 1 ? '' : 's'} found, ${fileCount} text file${fileCount === 1 ? '' : 's'} available.`;
+  status.className = 'files-status ok';
+
+  devicesEl.innerHTML = devices.map(device => `
+    <div class="usb-device">
+      <div>
+        <strong>${escHtml(device.label || device.mount || 'USB storage')}</strong>
+        <span>${escHtml(device.mount || '')}</span>
+      </div>
+      <span>${(device.text_files || []).length} text files</span>
+    </div>
+  `).join('');
+
+  if (selected) {
+    viewer.classList.remove('hidden');
+    meta.textContent = `${selected.relative_path || selected.name} • ${formatBytes(selected.size_bytes || 0)}${selected.truncated ? ' • truncated' : ''}`;
+    content.textContent = text;
+  } else {
+    viewer.classList.remove('hidden');
+    meta.textContent = 'No text file found on the detected USB storage.';
+    content.textContent = '';
+  }
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -916,14 +1239,16 @@ async function refreshSystemData() {
     const d = await apiFetch('/api/system');
     const jetsonTemp = d.jetson_cpu_temp ?? d.jetson_temp;
     const jetsonGpuTemp = d.jetson_gpu_temp;
-    const currentIp = d.current_ip || d.ips?.[0] || '--';
+    const currentIp = d.rover_current_ip || d.current_ip || d.rover_ips?.[0] || '--';
     document.getElementById('sysJetsonTemp').textContent = fmtNumber(jetsonTemp, 1, ' °C');
     setBarWidth('sysJetsonTempBar', jetsonTemp, 100);
     document.getElementById('sysJetsonGpuTemp').textContent = fmtNumber(jetsonGpuTemp, 1, ' °C');
     setBarWidth('sysJetsonGpuTempBar', jetsonGpuTemp, 100);
     document.getElementById('sysCurrentIp').textContent = currentIp;
     const netIp = document.getElementById('netGroundStationIp');
-    if (netIp) netIp.textContent = currentIp;
+    if (netIp) netIp.textContent = d.ground_station_ip || '--';
+    const roverIp = document.getElementById('netRoverIp');
+    if (roverIp) roverIp.textContent = currentIp;
     updateSubsystemOverview(d.subsystems || {});
     updateComms(d.comms || {});
     updateSystemHealth(d);
@@ -1092,6 +1417,131 @@ function updateComms(comms) {
     document.getElementById('link900Val').textContent = stability === null ? '--' : `${Math.round(stability)}%`;
     document.getElementById('link900Dot').className = `status-dot ${linkClass(link900.stability)}`;
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+// NETWORK TAB — Rocket radio polling
+// ══════════════════════════════════════════════════════════════
+
+function networkDotClass(status) {
+  if (status === 'good' || status === 'online') return 'dot-green';
+  if (status === 'degraded') return 'dot-yellow';
+  if (status === 'poor' || status === 'offline') return 'dot-red';
+  return 'dot-grey';
+}
+
+function networkStatusLabel(status) {
+  return String(status || 'unknown').replace(/_/g, ' ').toUpperCase();
+}
+
+function formatNullable(value, digits, suffix = '') {
+  if (value === null || value === undefined || value === '') return '--';
+  const n = asFiniteNumber(value);
+  return n === null ? '--' : `${n.toFixed(digits)}${suffix}`;
+}
+
+function setNetworkText(prefix, field, text) {
+  const el = document.getElementById(`network${prefix}${field}`);
+  if (el) el.textContent = text;
+}
+
+function updateNetworkCard(prefix, radio) {
+  radio = radio || {};
+  const status = radio.status || 'unconfigured';
+  const card = document.getElementById(`networkCard${prefix}`);
+  if (card) card.dataset.status = status;
+  setNetworkText(prefix, 'Status', networkStatusLabel(status));
+  setNetworkText(prefix, 'Latency', formatNullable(radio.latency_ms, 1));
+  const quality = radio.link_quality_pct === null || radio.link_quality_pct === undefined ? null : asFiniteNumber(radio.link_quality_pct);
+  setNetworkText(prefix, 'Quality', quality === null ? '--' : String(Math.round(quality)));
+  setNetworkText(prefix, 'DisplayIp', radio.ip || '--');
+  setNetworkText(prefix, 'Reachable', radio.configured ? (radio.reachable ? 'Reachable' : 'Offline') : 'Not configured');
+  setNetworkText(prefix, 'Signal', formatNullable(radio.signal_dbm, 0, ' dBm'));
+  setNetworkText(prefix, 'Noise', formatNullable(radio.noise_floor_dbm, 0, ' dBm'));
+  setNetworkText(prefix, 'Ccq', formatNullable(radio.ccq_pct, 0, '%'));
+  setNetworkText(prefix, 'TxRate', formatNullable(radio.tx_rate_mbps, 1, ' Mbps'));
+  setNetworkText(prefix, 'RxRate', formatNullable(radio.rx_rate_mbps, 1, ' Mbps'));
+
+  const txErrors = radio.tx_errors === null || radio.tx_errors === undefined ? null : asFiniteNumber(radio.tx_errors);
+  const rxErrors = radio.rx_errors === null || radio.rx_errors === undefined ? null : asFiniteNumber(radio.rx_errors);
+  const errText = txErrors === null && rxErrors === null ? '--' : `TX ${txErrors ?? '--'} / RX ${rxErrors ?? '--'}`;
+  setNetworkText(prefix, 'Errors', errText);
+}
+
+function updateHeaderNetworkStatus(m2, m900) {
+  const apply = (dotId, valId, radio) => {
+    const dot = document.getElementById(dotId);
+    const val = document.getElementById(valId);
+    if (!dot || !val || !radio) return;
+    dot.className = `status-dot ${networkDotClass(radio.status)}`;
+    const q = radio.link_quality_pct === null || radio.link_quality_pct === undefined ? null : asFiniteNumber(radio.link_quality_pct);
+    val.textContent = q === null ? (radio.reachable ? 'UP' : '--%') : `${Math.round(q)}%`;
+  };
+  apply('link24Dot', 'link24Val', m2);
+  apply('link900Dot', 'link900Val', m900);
+}
+
+function updateNetworkStatus(data) {
+  const cfg = data.config || {};
+  const m2 = data.rockets?.m2 || {};
+  const m900 = data.rockets?.m900 || {};
+
+  const m2Input = document.getElementById('networkM2Ip');
+  const m900Input = document.getElementById('networkM900Ip');
+  if (m2Input && document.activeElement !== m2Input) m2Input.value = cfg.m2_ip || '';
+  if (m900Input && document.activeElement !== m900Input) m900Input.value = cfg.m900_ip || '';
+
+  updateNetworkCard('M2', m2);
+  updateNetworkCard('M900', m900);
+  updateHeaderNetworkStatus(m2, m900);
+
+  const updated = document.getElementById('networkUpdated');
+  if (updated) updated.textContent = data.ts ? `Updated ${new Date(data.ts * 1000).toLocaleTimeString()}` : 'Not polled';
+  const snmpState = document.getElementById('networkSnmpState');
+  if (snmpState) snmpState.textContent = data.snmp?.available ? 'snmpget available' : 'snmpget not installed';
+  const community = document.getElementById('networkSnmpCommunity');
+  if (community) community.textContent = data.snmp?.community || '--';
+}
+
+async function refreshNetworkStatus(showErrors = false) {
+  try {
+    const data = await apiFetch('/api/network/status');
+    updateNetworkStatus(data);
+  } catch (err) {
+    if (showErrors) showToast('error', 'Network Poll Failed', err.message);
+  }
+}
+
+async function saveNetworkConfig() {
+  const btn = document.getElementById('networkSaveBtn');
+  const m2Ip = document.getElementById('networkM2Ip')?.value || '';
+  const m900Ip = document.getElementById('networkM900Ip')?.value || '';
+  if (btn) btn.disabled = true;
+  try {
+    await apiFetch('/api/network/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ m2_ip: m2Ip, m900_ip: m900Ip }),
+    });
+    showToast('success', 'Network Saved', 'Rocket IP addresses updated');
+    await refreshNetworkStatus(true);
+  } catch (err) {
+    showToast('error', 'Network Save Failed', err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function initNetwork() {
+  document.getElementById('networkSaveBtn')?.addEventListener('click', saveNetworkConfig);
+  document.getElementById('networkPollBtn')?.addEventListener('click', () => refreshNetworkStatus(true));
+  document.querySelectorAll('#networkM2Ip, #networkM900Ip').forEach(input => {
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') saveNetworkConfig();
+    });
+  });
+  refreshNetworkStatus(false);
+  state.network.pollTimer = setInterval(() => refreshNetworkStatus(false), 3000);
 }
 
 function updateSubsystemOverview(subsystems) {
@@ -1324,12 +1774,14 @@ function bootApp() {
   initEStop();
   initWarningModal();
   initCameras();
+  initDashboardControls();
   initMap();
   initGamepadPolling();
   initLogs();
   initFiles();
   initPayloadControls();
   initMotorControls();
+  initNetwork();
 
   connectTelemetryWS();
   connectLogWS();

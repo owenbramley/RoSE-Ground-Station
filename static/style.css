@@ -69,43 +69,75 @@ html, body {
 ══════════════════════════════════════════════════════════ */
 #header {
   position: fixed; top: 0; left: 0; right: 0; z-index: 100;
-  min-height: 56px;
+  min-height: 64px;
   background: var(--bg2);
   border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 8px 16px;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px 14px;
+  padding: 10px 16px;
 }
 
-.header-left { display: flex; align-items: center; gap: 16px; flex: 1; min-width: 0; }
+.header-left {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
 
 .logo { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.logo-img { width: 32px; height: 32px; object-fit: contain; flex-shrink: 0; }
+.logo-img { width: 30px; height: 30px; object-fit: contain; flex-shrink: 0; }
 .logo-img:not(.hidden) + .logo-icon { display: none; }
 .logo-icon { color: var(--accent); font-size: 18px; }
-.logo-text  { font-weight: 700; font-size: 14px; letter-spacing: 0.04em; color: var(--text); white-space: nowrap; }
+.logo-text  {
+  font-weight: 800;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  white-space: nowrap;
+}
 
 /* Tab nav */
-.tab-nav { display: flex; gap: 2px; flex-wrap: wrap; min-width: 0; }
+.tab-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
 .tab-btn {
   background: none; border: none; color: var(--text-dim);
-  padding: 6px 10px; border-radius: var(--radius);
-  font-family: var(--sans); font-size: 12px; font-weight: 500;
+  min-height: 34px;
+  padding: 7px 10px; border-radius: var(--radius);
+  font-family: var(--sans); font-size: 12px; font-weight: 700;
   cursor: pointer; transition: all 0.15s; white-space: nowrap;
+  flex: 0 0 auto;
 }
 .tab-btn:hover  { color: var(--text); background: rgba(255,255,255,0.05); }
 .tab-btn.active { color: var(--text); background: rgba(255,55,168,0.22); border: 1px solid rgba(255,55,168,0.35); }
 
 /* Header right */
-.header-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.header-right {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  align-items: center;
+  justify-content: end;
+  gap: 8px;
+  min-width: 0;
+}
 
 .controller-status,
 .api-status,
 .link-status {
   display: flex; align-items: center; gap: 6px;
-  padding: 4px 10px; border-radius: var(--radius);
+  min-height: 34px;
+  padding: 6px 10px; border-radius: var(--radius);
   border: 1px solid var(--border);
-  font-size: 11px; color: var(--text-dim);
+  font-size: 12px; color: var(--text-dim);
   white-space: nowrap;
 }
 .link-status strong { color: var(--text); font-family: var(--mono); font-size: 11px; }
@@ -132,7 +164,7 @@ html, body {
    MAIN / TABS
 ══════════════════════════════════════════════════════════ */
 #main {
-  position: fixed; top: 56px; left: 0; right: 0; bottom: 0;
+  position: fixed; top: 64px; left: 0; right: 0; bottom: 0;
   overflow: hidden;
 }
 
@@ -215,6 +247,18 @@ html, body {
 }
 .camera-cell.camera-hidden { display: none; }
 
+.camera-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 220px;
+  color: var(--text-muted);
+  font-size: 13px;
+  border: 1px dashed rgba(255,255,255,0.18);
+  background: #050d18;
+}
+
 .camera-img {
   width: 100%; height: 100%;
   object-fit: cover;
@@ -228,11 +272,16 @@ html, body {
   text-shadow: 0 1px 4px #000;
   letter-spacing: 0.12em;
 }
-.camera-hide-btn {
+.camera-tools {
   position: absolute;
   top: 6px;
   right: 8px;
   z-index: 4;
+  display: flex;
+  gap: 6px;
+}
+.camera-hide-btn,
+.camera-still-btn {
   background: rgba(0,0,0,0.65);
   color: var(--text);
   border: 1px solid rgba(255,255,255,0.25);
@@ -242,7 +291,8 @@ html, body {
   font-weight: 700;
   cursor: pointer;
 }
-.camera-hide-btn:hover {
+.camera-hide-btn:hover,
+.camera-still-btn:hover {
   color: var(--accent);
   border-color: var(--accent);
 }
@@ -277,7 +327,6 @@ html, body {
   font-size: 11px;
 }
 .cam-err-icon { font-size: 28px; color: var(--red); }
-
 /* Subsystem overview */
 .subsystem-overview-section { flex: 0 0 auto; }
 .subsystem-overview-grid {
@@ -323,6 +372,90 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+/* Mission modes */
+.mission-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+}
+.mission-mode-btn {
+  min-height: 72px;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.mission-mode-btn:hover,
+.mission-mode-btn.active {
+  border-color: rgba(255,55,168,0.45);
+  background: rgba(255,55,168,0.12);
+}
+.mission-mode-title {
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.mission-mode-meta {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Dashboard timer */
+.timer-sync-state {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.timer-sync-state.running { color: var(--green); }
+.timer-sync-state.paused { color: var(--yellow); }
+.dashboard-timer-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dashboard-timer-display {
+  font-size: 42px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0;
+}
+.dashboard-timer-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.timer-laps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  min-height: 0;
+}
+.timer-lap {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
 }
 
 /* ── Telemetry ────────────────────────────────────────────── */
@@ -485,6 +618,63 @@ html, body {
 }
 .files-status.error { color: var(--red); }
 .files-status.ok    { color: var(--green); }
+.usb-device-list {
+  width: 100%;
+  max-width: 920px;
+  display: grid;
+  gap: 8px;
+  text-align: left;
+}
+.usb-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.usb-device div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.usb-device strong { color: var(--text); }
+.usb-device span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.text-file-viewer {
+  width: 100%;
+  max-width: 920px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #06101e;
+  overflow: hidden;
+  text-align: left;
+}
+.text-file-meta {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.text-file-content {
+  max-height: 420px;
+  overflow: auto;
+  padding: 12px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* ══════════════════════════════════════════════════════════
    SYSTEM OVERVIEW TAB
@@ -611,6 +801,155 @@ html, body {
 .net-label { color: var(--text-dim); }
 .net-val   { font-weight: 600; }
 .net-val.mono { font-family: var(--mono); font-size: 11px; }
+
+/* ══════════════════════════════════════════════════════════
+   NETWORK TAB
+══════════════════════════════════════════════════════════ */
+#tab-network {
+  display: none;
+  gap: 12px;
+}
+#tab-network.active {
+  display: flex;
+  flex-direction: column;
+}
+
+.network-updated {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.network-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr)) auto;
+  gap: 10px;
+  padding: 12px;
+  align-items: end;
+}
+.network-ip-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.network-ip-field span,
+.network-hero-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.network-ip-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 13px;
+  outline: none;
+}
+.network-ip-input:focus {
+  border-color: var(--accent-dim);
+}
+.network-config-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.network-radio-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.network-card-status {
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+.network-radio-card[data-status="good"] .network-card-status,
+.network-radio-card[data-status="online"] .network-card-status { color: var(--green); }
+.network-radio-card[data-status="degraded"] .network-card-status { color: var(--yellow); }
+.network-radio-card[data-status="poor"] .network-card-status,
+.network-radio-card[data-status="offline"] .network-card-status { color: var(--red); }
+
+.network-metric-hero {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.network-metric-hero > div {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  min-width: 0;
+}
+.network-hero-value {
+  margin-top: 6px;
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1;
+}
+.network-hero-value span:last-child {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin-left: 3px;
+}
+.network-stat-list {
+  padding: 4px 0;
+}
+.network-stat-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.network-stat-row:last-child {
+  border-bottom: none;
+}
+.network-stat-row span {
+  color: var(--text-dim);
+}
+.network-stat-row strong {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.network-notes-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px;
+}
+.network-note {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+.network-note span {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.network-note strong {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
 
 /* ══════════════════════════════════════════════════════════
    PAYLOAD TAB — subsystem connection header
@@ -886,7 +1225,7 @@ html, body {
    TOAST NOTIFICATIONS
 ══════════════════════════════════════════════════════════ */
 #toastContainer {
-  position: fixed; top: 62px; right: 16px; z-index: 400;
+  position: fixed; top: 76px; right: 16px; z-index: 400;
   display: flex; flex-direction: column; gap: 8px;
   pointer-events: none;
 }
@@ -1012,6 +1351,38 @@ html, body {
   display: block;
 }
 
+.camera-still-modal-box {
+  width: min(1040px, calc(100vw - 32px));
+}
+.camera-still-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.camera-still-image-wrap {
+  min-height: 360px;
+  max-height: 70vh;
+  background: #02060b;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  color: var(--text-muted);
+}
+.camera-still-image-wrap img {
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+  display: block;
+}
+.camera-still-download {
+  align-self: flex-end;
+  text-decoration: none;
+}
+
 /* ══════════════════════════════════════════════════════════
    PASSWORD OVERLAY
 ══════════════════════════════════════════════════════════ */
@@ -1117,20 +1488,23 @@ html, body {
 
 .gs-url-chip {
   display: flex; align-items: center; gap: 7px;
+  min-height: 34px;
   padding: 4px 10px; border-radius: var(--radius);
   border: 1px solid rgba(255,55,168,0.25);
   background: rgba(255,55,168,0.08);
   font-family: var(--mono); font-size: 11px; color: var(--accent);
   cursor: pointer; transition: all 0.15s;
   position: relative; white-space: nowrap;
-  max-width: 240px; overflow: hidden;
+  max-width: min(260px, 28vw);
+  min-width: 0;
+  overflow: hidden;
 }
 .gs-url-chip:hover {
   background: rgba(255,55,168,0.16);
   border-color: rgba(255,55,168,0.5);
 }
 .gs-url-icon { flex-shrink: 0; font-size: 12px; }
-.gs-url-text { overflow: hidden; text-overflow: ellipsis; }
+#gsUrlText { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .gs-url-copied {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
@@ -1152,14 +1526,30 @@ html, body {
 }
 
 @media (max-width: 1100px) {
-  #header { height: auto; min-height: 56px; align-items: flex-start; padding: 8px 12px; }
-  .header-left, .header-right { flex-wrap: wrap; gap: 8px; }
-  .tab-nav { flex-wrap: wrap; }
-  #main { top: 92px; }
+  #header {
+    grid-template-columns: 1fr;
+    min-height: 118px;
+    padding: 10px 12px;
+  }
+  .header-left {
+    grid-template-columns: auto minmax(0, 1fr);
+    width: 100%;
+  }
+  .header-right {
+    grid-auto-flow: row;
+    grid-template-columns: repeat(5, minmax(0, auto));
+    justify-content: stretch;
+    width: 100%;
+  }
+  .header-right > * { justify-content: center; min-width: 0; }
+  .gs-url-chip { max-width: none; }
+  #main { top: 118px; }
+  #toastContainer { top: 130px; right: 12px; }
   .subsystem-overview-grid, .system-grid { grid-template-columns: repeat(2, 1fr); }
+  .network-config-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .network-config-actions { grid-column: 1 / -1; }
   .payload-status-grid { grid-template-columns: repeat(2, 1fr); }
   .dashboard-main-row { grid-template-columns: 1fr; }
-  .gs-url-chip { max-width: 180px; }
 }
 
 @media (max-width: 1200px) {
@@ -1172,13 +1562,50 @@ html, body {
 @media (max-width: 720px) {
   html, body { overflow: auto; }
   #header, #main { position: static; }
-  .header-left, .header-right { width: 100%; }
-  .header-left { align-items: flex-start; flex-direction: column; }
-  .logo-text { font-size: 13px; }
-  .tab-nav { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #toastContainer {
+    top: auto;
+    left: 10px;
+    right: 10px;
+    bottom: 10px;
+  }
+  .toast {
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
+  #header {
+    grid-template-columns: 1fr;
+    padding: 10px;
+    gap: 10px;
+  }
+  .header-left {
+    grid-template-columns: 1fr;
+    width: 100%;
+    gap: 8px;
+  }
+  .logo { min-width: 0; }
+  .logo-text {
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tab-nav {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    overflow: visible;
+  }
   .tab-btn { width: 100%; text-align: center; }
-  .header-right > * { flex: 1 1 auto; justify-content: center; }
-  .camera-grid, .subsystem-overview-grid, .telemetry-grid, .system-grid,
+  .header-right {
+    width: 100%;
+    grid-auto-flow: row;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .header-right > * { justify-content: center; }
+  .gs-url-chip { grid-column: 1 / -1; }
+  .camera-grid, .subsystem-overview-grid, .telemetry-grid, .system-grid, .mission-mode-grid, .timer-laps,
+  .network-config-grid, .network-radio-grid, .network-metric-hero, .network-notes-grid,
   .payload-status-grid, .payload-sensor-grid, .byte-columns { grid-template-columns: 1fr; }
   .camera-grid { grid-auto-rows: minmax(240px, 45vh); }
   .hidden-camera-dock { left: 12px; right: 12px; bottom: 12px; }

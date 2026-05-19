@@ -225,14 +225,6 @@ SNMP_OIDS = {
         ".1.3.6.1.4.1.41112.1.4.1.1.7.1",
         ".1.3.6.1.4.1.41112.1.4.5.1.10.1",
     ],
-    "tx_rate_mbps": [
-        ".1.3.6.1.4.1.41112.1.4.1.1.9.1",
-        ".1.3.6.1.4.1.41112.1.4.5.1.8.1",
-    ],
-    "rx_rate_mbps": [
-        ".1.3.6.1.4.1.41112.1.4.1.1.10.1",
-        ".1.3.6.1.4.1.41112.1.4.5.1.9.1",
-    ],
     "tx_errors": [
         ".1.3.6.1.4.1.41112.1.4.1.1.13.1",
     ],
@@ -365,8 +357,6 @@ async def _rocket_status(key: str, host: str) -> dict:
         "signal_dbm": None,
         "noise_floor_dbm": None,
         "ccq_pct": None,
-        "tx_rate_mbps": None,
-        "rx_rate_mbps": None,
         "tx_errors": None,
         "rx_errors": None,
         "link_quality_pct": None,

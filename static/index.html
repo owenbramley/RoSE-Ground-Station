@@ -40,6 +40,16 @@
       <span>900M</span>
       <strong id="link900Val">--%</strong>
     </div>
+    <div class="link-status" title="Arm controller ROS topic health">
+      <span class="status-dot dot-yellow" id="armControllerDot"></span>
+      <span>ARM</span>
+      <strong id="armControllerVal">--</strong>
+    </div>
+    <div class="link-status" title="Drive controller ROS topic health">
+      <span class="status-dot dot-yellow" id="driveControllerDot"></span>
+      <span>DRIVE</span>
+      <strong id="driveControllerVal">--</strong>
+    </div>
     <!-- Ground station access URL — click to copy -->
     <div class="gs-url-chip" id="gsUrlChip" title="Click to copy URL">
       <span class="gs-url-icon">⊕</span>
@@ -239,6 +249,26 @@
               <button class="btn-secondary btn-sm" id="timerResetBtn">Reset</button>
             </div>
             <div class="timer-laps" id="timerLaps"></div>
+          </div>
+        </section>
+
+        <section class="section controller-topic-section">
+          <div class="section-header"><span>Controller Topics</span></div>
+          <div class="controller-topic-grid">
+            <div class="controller-topic-card" id="armControllerCard">
+              <span class="status-dot dot-yellow" id="dashArmControllerDot"></span>
+              <div>
+                <div class="controller-topic-label">Arm Controller</div>
+                <div class="controller-topic-value" id="dashArmControllerVal">Checking...</div>
+              </div>
+            </div>
+            <div class="controller-topic-card" id="driveControllerCard">
+              <span class="status-dot dot-yellow" id="dashDriveControllerDot"></span>
+              <div>
+                <div class="controller-topic-label">Drive Controller</div>
+                <div class="controller-topic-value" id="dashDriveControllerVal">Checking...</div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -487,14 +517,6 @@
             <span class="net-label">Radio Band</span>
             <span class="net-val">2.4 GHz + 900 MHz</span>
           </div>
-          <div class="net-row">
-            <span class="net-label">TX Rate</span>
-            <span class="net-val">12 Mbps</span>
-          </div>
-          <div class="net-row">
-            <span class="net-label">RX Rate</span>
-            <span class="net-val">2.4 Mbps</span>
-          </div>
         </div>
       </section>
 
@@ -547,8 +569,6 @@
           <div class="network-stat-row"><span>Signal</span><strong class="mono" id="networkM2Signal">--</strong></div>
           <div class="network-stat-row"><span>Noise Floor</span><strong class="mono" id="networkM2Noise">--</strong></div>
           <div class="network-stat-row"><span>CCQ</span><strong class="mono" id="networkM2Ccq">--</strong></div>
-          <div class="network-stat-row"><span>TX Rate</span><strong class="mono" id="networkM2TxRate">--</strong></div>
-          <div class="network-stat-row"><span>RX Rate</span><strong class="mono" id="networkM2RxRate">--</strong></div>
           <div class="network-stat-row"><span>Packet Errors</span><strong class="mono" id="networkM2Errors">--</strong></div>
         </div>
       </section>
@@ -574,8 +594,6 @@
           <div class="network-stat-row"><span>Signal</span><strong class="mono" id="networkM900Signal">--</strong></div>
           <div class="network-stat-row"><span>Noise Floor</span><strong class="mono" id="networkM900Noise">--</strong></div>
           <div class="network-stat-row"><span>CCQ</span><strong class="mono" id="networkM900Ccq">--</strong></div>
-          <div class="network-stat-row"><span>TX Rate</span><strong class="mono" id="networkM900TxRate">--</strong></div>
-          <div class="network-stat-row"><span>RX Rate</span><strong class="mono" id="networkM900RxRate">--</strong></div>
           <div class="network-stat-row"><span>Packet Errors</span><strong class="mono" id="networkM900Errors">--</strong></div>
         </div>
       </section>

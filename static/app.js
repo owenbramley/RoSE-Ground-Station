@@ -1204,6 +1204,8 @@ function formatBytes(bytes) {
 // ══════════════════════════════════════════════════════════════
 
 function updateSubsysStatus(payloadConn, armConn, driveConn) {
+  updateControllerTopicHealth(armConn, driveConn);
+
   const pd = document.querySelector('#sysPayloadConn .status-dot');
   if (pd) {
     pd.className = `status-dot ${payloadConn ? 'dot-green' : 'dot-red'}`;
@@ -1224,6 +1226,25 @@ function updateSubsysStatus(payloadConn, armConn, driveConn) {
     dd.className = `status-dot ${driveConn ? 'dot-green' : 'dot-red'}`;
     document.getElementById('sysDriveVal').textContent = driveConn ? 'Connected' : 'Disconnected';
   }
+}
+
+function updateControllerTopicHealth(armConn, driveConn) {
+  const setHealth = (name, connected) => {
+    const label = connected ? 'Online' : 'Offline';
+    const dotCls = connected ? 'dot-green' : 'dot-red';
+    const headerDot = document.getElementById(`${name}ControllerDot`);
+    const headerVal = document.getElementById(`${name}ControllerVal`);
+    const dashDot = document.getElementById(`dash${name.charAt(0).toUpperCase() + name.slice(1)}ControllerDot`);
+    const dashVal = document.getElementById(`dash${name.charAt(0).toUpperCase() + name.slice(1)}ControllerVal`);
+    const dashCard = document.getElementById(`${name}ControllerCard`);
+    if (headerDot) headerDot.className = `status-dot ${dotCls}`;
+    if (headerVal) headerVal.textContent = label.toUpperCase();
+    if (dashDot) dashDot.className = `status-dot ${dotCls}`;
+    if (dashVal) dashVal.textContent = `${label} on ROS network`;
+    if (dashCard) dashCard.classList.toggle('offline', !connected);
+  };
+  setHealth('arm', !!armConn);
+  setHealth('drive', !!driveConn);
 }
 
 function updateSubsysHeader(name, connected) {
@@ -1404,19 +1425,9 @@ function linkClass(stability) {
 }
 
 function updateComms(comms) {
-  comms = comms || {};
-  const link24 = comms.link_24ghz;
-  const link900 = comms.link_900mhz;
-  if (link24) {
-    const stability = asFiniteNumber(link24.stability);
-    document.getElementById('link24Val').textContent = stability === null ? '--' : `${Math.round(stability)}%`;
-    document.getElementById('link24Dot').className = `status-dot ${linkClass(link24.stability)}`;
-  }
-  if (link900) {
-    const stability = asFiniteNumber(link900.stability);
-    document.getElementById('link900Val').textContent = stability === null ? '--' : `${Math.round(stability)}%`;
-    document.getElementById('link900Dot').className = `status-dot ${linkClass(link900.stability)}`;
-  }
+  // Navbar radio chips are driven by Rocket polling so they show Rocket link quality.
+  // System health still reads comms directly from /api/system.
+  void comms;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1459,8 +1470,6 @@ function updateNetworkCard(prefix, radio) {
   setNetworkText(prefix, 'Signal', formatNullable(radio.signal_dbm, 0, ' dBm'));
   setNetworkText(prefix, 'Noise', formatNullable(radio.noise_floor_dbm, 0, ' dBm'));
   setNetworkText(prefix, 'Ccq', formatNullable(radio.ccq_pct, 0, '%'));
-  setNetworkText(prefix, 'TxRate', formatNullable(radio.tx_rate_mbps, 1, ' Mbps'));
-  setNetworkText(prefix, 'RxRate', formatNullable(radio.rx_rate_mbps, 1, ' Mbps'));
 
   const txErrors = radio.tx_errors === null || radio.tx_errors === undefined ? null : asFiniteNumber(radio.tx_errors);
   const rxErrors = radio.rx_errors === null || radio.rx_errors === undefined ? null : asFiniteNumber(radio.rx_errors);
@@ -1475,7 +1484,7 @@ function updateHeaderNetworkStatus(m2, m900) {
     if (!dot || !val || !radio) return;
     dot.className = `status-dot ${networkDotClass(radio.status)}`;
     const q = radio.link_quality_pct === null || radio.link_quality_pct === undefined ? null : asFiniteNumber(radio.link_quality_pct);
-    val.textContent = q === null ? (radio.reachable ? 'UP' : '--%') : `${Math.round(q)}%`;
+    val.textContent = q === null ? '--%' : `${Math.round(q)}%`;
   };
   apply('link24Dot', 'link24Val', m2);
   apply('link900Dot', 'link900Val', m900);

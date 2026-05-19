@@ -458,6 +458,38 @@ html, body {
   font-size: 11px;
 }
 
+/* Controller topic health */
+.controller-topic-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+}
+.controller-topic-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.controller-topic-card.offline {
+  border-color: rgba(239,68,68,0.45);
+}
+.controller-topic-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.controller-topic-value {
+  font-size: 13px;
+  font-weight: 800;
+}
+
 /* ── Telemetry ────────────────────────────────────────────── */
 .telemetry-section { overflow-y: auto; flex: 1; min-height: 0; }
 
@@ -1606,6 +1638,7 @@ html, body {
   .gs-url-chip { grid-column: 1 / -1; }
   .camera-grid, .subsystem-overview-grid, .telemetry-grid, .system-grid, .mission-mode-grid, .timer-laps,
   .network-config-grid, .network-radio-grid, .network-metric-hero, .network-notes-grid,
+  .controller-topic-grid,
   .payload-status-grid, .payload-sensor-grid, .byte-columns { grid-template-columns: 1fr; }
   .camera-grid { grid-auto-rows: minmax(240px, 45vh); }
   .hidden-camera-dock { left: 12px; right: 12px; bottom: 12px; }

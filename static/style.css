@@ -672,15 +672,50 @@ html, body {
   color: var(--text-dim);
   font-size: 12px;
 }
-.usb-device div {
+.usb-device-info {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  flex: 1;
+  gap: 4px;
 }
 .usb-device strong { color: var(--text); }
 .usb-device span {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.storage-file-list {
+  display: grid;
+  gap: 5px;
+  margin-top: 6px;
+}
+.storage-file-btn {
+  width: 100%;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+.storage-file-btn:hover { border-color: var(--accent-dim); }
+.storage-file-btn span { min-width: 0; }
+.storage-file-btn small {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.storage-empty {
+  color: var(--text-muted);
+  font-size: 11px;
 }
 .text-file-viewer {
   width: 100%;

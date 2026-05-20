@@ -1154,11 +1154,11 @@ function initLogs() {
 // ══════════════════════════════════════════════════════════════
 
 function initFiles() {
-  document.getElementById('getFilesBtn')?.addEventListener('click', refreshUsbFiles);
-  document.getElementById('refreshFilesBtn')?.addEventListener('click', refreshUsbFiles);
+  document.getElementById('getFilesBtn')?.addEventListener('click', () => refreshStorageFiles());
+  document.getElementById('refreshFilesBtn')?.addEventListener('click', () => refreshStorageFiles());
 }
 
-async function refreshUsbFiles() {
+async function refreshStorageFiles(filePath = '') {
   const btn = document.getElementById('getFilesBtn');
   const refreshBtn = document.getElementById('refreshFilesBtn');
   const status = document.getElementById('filesStatus');
@@ -1171,7 +1171,7 @@ async function refreshUsbFiles() {
   if (refreshBtn) refreshBtn.disabled = true;
   if (icon) icon.textContent = '↻';
   if (status) {
-    status.textContent = 'Refreshing Jetson USB storage...';
+    status.textContent = filePath ? 'Fetching selected file...' : 'Refreshing external storage...';
     status.className = 'files-status';
   }
   if (viewer) viewer.classList.add('hidden');
@@ -1180,19 +1180,19 @@ async function refreshUsbFiles() {
   if (devicesEl) devicesEl.innerHTML = '';
 
   try {
-    const data = await apiFetch('/api/files');
-    renderUsbFiles(data);
+    const data = await apiFetch(filePath ? `/api/files?path=${encodeURIComponent(filePath)}` : '/api/files');
+    renderStorageFiles(data);
   } catch (err) {
     const isNoStorage = err.message.includes('503')
       || err.message.toLowerCase().includes('no_storage')
       || err.message.toLowerCase().includes('no external');
     if (isNoStorage) {
-      status.textContent = 'No external storage device detected on the Jetson.';
+      status.textContent = 'No external storage device detected.';
       status.className = 'files-status';
     } else {
       status.textContent = `Error: ${err.message}`;
       status.className = 'files-status error';
-      showToast('error', 'USB Refresh Error', err.message);
+      showToast('error', 'Storage Fetch Error', err.message);
     }
   } finally {
     if (btn) btn.disabled = false;
@@ -1201,7 +1201,7 @@ async function refreshUsbFiles() {
   }
 }
 
-function renderUsbFiles(data) {
+function renderStorageFiles(data) {
   const status = document.getElementById('filesStatus');
   const devicesEl = document.getElementById('usbDeviceList');
   const viewer = document.getElementById('textFileViewer');
@@ -1212,18 +1212,33 @@ function renderUsbFiles(data) {
   const text = data.content ?? '';
 
   const fileCount = devices.reduce((sum, device) => sum + (device.text_files || []).length, 0);
-  status.textContent = `${devices.length} USB device${devices.length === 1 ? '' : 's'} found, ${fileCount} text file${fileCount === 1 ? '' : 's'} available.`;
+  status.textContent = `${devices.length} storage device${devices.length === 1 ? '' : 's'} found, ${fileCount} text file${fileCount === 1 ? '' : 's'} available.`;
   status.className = 'files-status ok';
 
   devicesEl.innerHTML = devices.map(device => `
     <div class="usb-device">
-      <div>
-        <strong>${escHtml(device.label || device.mount || 'USB storage')}</strong>
+      <div class="usb-device-info">
+        <strong>${escHtml(device.label || device.mount || 'External storage')}</strong>
         <span>${escHtml(device.mount || '')}</span>
+        <div class="storage-file-list">
+          ${(device.text_files || []).map(file => `
+            <button class="storage-file-btn" data-file-path="${escHtml(file.path || file.relative_path || '')}">
+              <span>${escHtml(file.relative_path || file.name || 'Text file')}</span>
+              <small>${formatBytes(file.size_bytes || 0)}</small>
+            </button>
+          `).join('') || '<span class="storage-empty">No text files found</span>'}
+        </div>
       </div>
       <span>${(device.text_files || []).length} text files</span>
     </div>
   `).join('');
+
+  devicesEl.querySelectorAll('.storage-file-btn').forEach(button => {
+    button.addEventListener('click', () => {
+      const filePath = button.dataset.filePath || '';
+      if (filePath) refreshStorageFiles(filePath);
+    });
+  });
 
   if (selected) {
     viewer.classList.remove('hidden');

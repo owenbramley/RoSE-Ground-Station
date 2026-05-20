@@ -264,7 +264,7 @@ Restart=always
 RestartSec=5
 EnvironmentFile=/etc/rose-ground-station.env
 ExecStartPre=-/usr/bin/docker rm -f rose-ground-station
-ExecStartPre=/home/pi/rose-ground-station/scripts/raspberry-pi-clean-storage.sh
+ExecStartPre=+/home/pi/rose-ground-station/scripts/raspberry-pi-clean-storage.sh
 ExecStart=/usr/bin/docker run --rm \
   --name rose-ground-station \
   --net=host \

@@ -6,6 +6,7 @@ All routes (except /api/auth and the static login page) require a valid bearer t
 import asyncio
 import json
 import logging
+import os
 import socket
 import time
 import urllib.parse
@@ -36,6 +37,9 @@ logging.basicConfig(
 logger = logging.getLogger("api.main")
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
+DEFAULT_STORAGE_ROOTS = ("/media", "/mnt", "/run/media")
+MAX_TEXT_FILES_PER_DEVICE = 200
+MAX_TEXT_FILE_BYTES = 1024 * 1024
 
 # ---------------------------------------------------------------------------
 # Auth dependency
@@ -106,6 +110,204 @@ def _get_camera_client_ip() -> str:
         except OSError as e:
             bridge.add_log("WARN", f"Could not resolve route to rover camera service: {e}", "camera")
     return _get_local_ips()[0]
+
+
+# ---------------------------------------------------------------------------
+# External storage helpers
+# ---------------------------------------------------------------------------
+
+def _configured_storage_roots() -> list[Path]:
+    roots = [
+        Path(root.strip())
+        for root in os.environ.get("GS_STORAGE_ROOTS", "").split(",")
+        if root.strip()
+    ]
+    roots.extend(Path(root) for root in DEFAULT_STORAGE_ROOTS)
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key not in seen:
+            unique.append(root)
+            seen.add(key)
+    return unique
+
+
+def _mounts_from_proc() -> list[dict]:
+    try:
+        lines = Path("/proc/mounts").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    ignored_fs = {
+        "autofs", "binfmt_misc", "bpf", "cgroup", "cgroup2", "debugfs", "devpts", "devtmpfs",
+        "efivarfs", "fusectl", "mqueue", "overlay", "proc", "pstore", "securityfs", "squashfs",
+        "sysfs", "tmpfs", "tracefs",
+    }
+    mounts: list[dict] = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        source, mount_point, fstype = parts[:3]
+        mount_point = mount_point.replace("\\040", " ")
+        if fstype in ignored_fs:
+            continue
+        is_external_path = mount_point.startswith(("/media/", "/mnt/", "/run/media/", "/Volumes/"))
+        is_removable_block = source.startswith(("/dev/sd", "/dev/mmcblk", "/dev/disk/by-id/usb", "/dev/disk/by-label"))
+        if not (is_external_path or is_removable_block):
+            continue
+        path = Path(mount_point)
+        if path.exists() and path.is_dir():
+            mounts.append({"source": source, "mount": path, "fstype": fstype, "label": path.name})
+    return mounts
+
+
+def _storage_mounts() -> list[dict]:
+    mounts: list[dict] = []
+    seen: set[str] = set()
+
+    for proc_mount in _mounts_from_proc():
+        mount = proc_mount["mount"]
+        try:
+            key = str(mount.resolve())
+        except OSError:
+            continue
+        if key in seen:
+            continue
+        mounts.append(proc_mount)
+        seen.add(key)
+
+    for root in _configured_storage_roots():
+        if not root.is_dir():
+            continue
+
+        candidates: list[Path]
+        if str(root) in DEFAULT_STORAGE_ROOTS:
+            candidates = []
+            try:
+                children = sorted(root.iterdir(), key=lambda p: p.name.lower())
+            except (OSError, PermissionError):
+                continue
+            for child in children:
+                if not child.is_dir():
+                    continue
+                if root.name in ("media", "run") or child.name == os.environ.get("USER"):
+                    try:
+                        candidates.extend(
+                            grandchild
+                            for grandchild in sorted(child.iterdir(), key=lambda p: p.name.lower())
+                            if grandchild.is_dir()
+                        )
+                    except (OSError, PermissionError):
+                        continue
+                else:
+                    candidates.append(child)
+        else:
+            candidates = [root]
+
+        for mount in candidates:
+            try:
+                key = str(mount.resolve())
+            except OSError:
+                continue
+            if key in seen:
+                continue
+            try:
+                next(mount.iterdir())
+            except (StopIteration, OSError, PermissionError):
+                continue
+            mounts.append({"source": "", "mount": mount, "fstype": "", "label": mount.name})
+            seen.add(key)
+
+    return mounts
+
+
+def _text_files_for_mount(mount: Path) -> list[dict]:
+    files: list[dict] = []
+    for current_root, dirnames, filenames in os.walk(mount):
+        dirnames[:] = [
+            name for name in dirnames
+            if not name.startswith(".") and name not in {"System Volume Information", "$RECYCLE.BIN"}
+        ]
+        current_path = Path(current_root)
+        for filename in filenames:
+            if not filename.lower().endswith(".txt"):
+                continue
+            path = current_path / filename
+            try:
+                stat = path.stat()
+                relative_path = path.relative_to(mount)
+            except OSError:
+                continue
+            files.append({
+                "name": filename,
+                "path": str(path),
+                "relative_path": str(relative_path),
+                "size_bytes": stat.st_size,
+                "modified_at": stat.st_mtime,
+            })
+            if len(files) >= MAX_TEXT_FILES_PER_DEVICE:
+                return sorted(files, key=lambda item: item["modified_at"], reverse=True)
+    return sorted(files, key=lambda item: item["modified_at"], reverse=True)
+
+
+def _read_text_file(mount: Path, relative_path: str) -> tuple[str, bool]:
+    path = (mount / relative_path).resolve()
+    mount_root = mount.resolve()
+    if mount_root not in path.parents and path != mount_root:
+        raise ValueError("File path escapes storage device")
+
+    size = path.stat().st_size
+    with path.open("rb") as f:
+        data = f.read(MAX_TEXT_FILE_BYTES)
+    return data.decode("utf-8", errors="replace"), size > MAX_TEXT_FILE_BYTES
+
+
+def _scan_local_storage(requested_path: Optional[str] = None) -> dict:
+    devices: list[dict] = []
+    selected: Optional[tuple[Path, dict]] = None
+
+    for mount_info in _storage_mounts():
+        mount = mount_info["mount"]
+        text_files = _text_files_for_mount(mount)
+        device = {
+            "label": mount_info.get("label") or mount.name,
+            "mount": str(mount),
+            "source": mount_info.get("source") or "",
+            "fstype": mount_info.get("fstype") or "",
+            "text_files": text_files,
+        }
+        devices.append(device)
+        try:
+            requested = Path(requested_path).resolve() if requested_path else None
+        except OSError:
+            requested = None
+        for text_file in text_files:
+            if requested is not None:
+                candidate = (mount / text_file["relative_path"]).resolve()
+                if candidate == requested:
+                    selected = (mount, text_file)
+                    continue
+            if requested is None and (selected is None or text_file["modified_at"] > selected[1]["modified_at"]):
+                selected = (mount, text_file)
+
+    if not devices:
+        return {"ok": False, "error": "no_storage", "devices": []}
+
+    response = {"ok": True, "devices": devices, "selected_file": None, "content": ""}
+    if selected:
+        mount, selected_file = selected
+        try:
+            content, truncated = _read_text_file(mount, selected_file["relative_path"])
+            selected_file = dict(selected_file)
+            selected_file["truncated"] = truncated
+            response["selected_file"] = selected_file
+            response["content"] = content
+        except (OSError, UnicodeError, ValueError) as e:
+            response["selected_file"] = dict(selected_file)
+            response["error"] = f"Could not read selected text file: {e}"
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -813,11 +1015,16 @@ async def capture_360_image(_t: str = Depends(require_auth)):
 
 
 @app.get("/api/files")
-async def list_files(_t: str = Depends(require_auth)):
+async def list_files(path: Optional[str] = Query(None), _t: str = Depends(require_auth)):
+    storage = await asyncio.to_thread(_scan_local_storage, path)
+    if storage.get("ok") and (not path or storage.get("selected_file")):
+        return storage
+
     try:
-        storage = bridge.get_rover_storage()
+        storage = await asyncio.to_thread(bridge.get_rover_storage, path)
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        logger.debug("Rover storage lookup failed after local scan: %s", e)
+        storage = {"ok": False, "error": "no_storage"}
     if not storage.get("ok"):
         return JSONResponse(
             status_code=503,

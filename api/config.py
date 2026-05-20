@@ -32,9 +32,18 @@ class Config:
         for port in os.environ.get("GS_CAMERA_UDP_PORTS", "5000,5001,5002,5003,5004,5005,5006,5007").split(",")
         if port.strip()
     ])
-    rover_camera_service_url: str = field(
-        default_factory=lambda: os.environ.get("GS_ROVER_CAMERA_SERVICE_URL", "http://192.168.0.14:8765").rstrip("/")
-    )
+    rover_camera_service_urls: list[str] = field(default_factory=lambda: [
+        url.strip().rstrip("/")
+        for url in os.environ.get(
+            "GS_ROVER_CAMERA_SERVICE_URLS",
+            os.environ.get(
+                "GS_ROVER_CAMERA_SERVICE_URL",
+                "http://rover.local:8765,http://rose-rover.local:8765,http://urc-rover.local:8765",
+            ),
+        ).split(",")
+        if url.strip()
+    ])
+    rover_camera_service_port: int = field(default_factory=lambda: int(os.environ.get("GS_ROVER_CAMERA_SERVICE_PORT", "8765")))
     rover_camera_max_fps: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_FPS", "15")))
     rover_camera_max_width: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_WIDTH", "640")))
     rover_camera_max_height: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_HEIGHT", "480")))

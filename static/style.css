@@ -88,7 +88,7 @@ html, body {
 }
 
 .logo { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.logo-img { width: 30px; height: 30px; object-fit: contain; flex-shrink: 0; }
+.logo-img { width: 34px; height: 34px; object-fit: contain; flex-shrink: 0; }
 .logo-img:not(.hidden) + .logo-icon { display: none; }
 .logo-icon { color: var(--accent); font-size: 18px; }
 .logo-text  {
@@ -1448,6 +1448,7 @@ html, body {
 .auth-logo {
   display: flex; align-items: center; justify-content: center; gap: 10px;
 }
+.auth-logo-img { width: 46px; height: 46px; object-fit: contain; flex-shrink: 0; }
 .auth-logo-icon { color: var(--accent); font-size: 22px; }
 .auth-logo-text { font-weight: 800; font-size: 16px; letter-spacing: 0.05em; }
 

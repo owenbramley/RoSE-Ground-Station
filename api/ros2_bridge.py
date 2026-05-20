@@ -431,22 +431,67 @@ store = _DataStore()
 _receiver_lock = threading.RLock()
 _receiver_stop_events: dict[str, threading.Event] = {}
 _receiver_threads: dict[str, threading.Thread] = {}
+_rover_camera_service_url: Optional[str] = None
+_rover_camera_service_lock = threading.RLock()
+
+
+def _rover_camera_service_candidates() -> list[str]:
+    candidates: list[str] = []
+
+    with _rover_camera_service_lock:
+        cached_url = _rover_camera_service_url
+    if cached_url:
+        candidates.append(cached_url)
+
+    with store._lock:
+        rover_ips = [
+            str(ip).strip()
+            for ip in store.system.get("rover_ips", [])
+            if str(ip).strip()
+        ]
+        jetson_ip = str(store.system.get("jetson_ip") or "").strip()
+    if jetson_ip and jetson_ip not in rover_ips:
+        rover_ips.insert(0, jetson_ip)
+
+    for rover_ip in rover_ips:
+        url = f"http://{rover_ip}:{config.rover_camera_service_port}"
+        if url not in candidates:
+            candidates.append(url)
+
+    for url in config.rover_camera_service_urls:
+        if url and url not in candidates:
+            candidates.append(url)
+
+    return candidates
 
 
 def _rover_request(method: str, path: str, payload: Optional[dict] = None, timeout: float = 3.0) -> dict:
-    url = config.rover_camera_service_url + path
     data = None
     headers = {"Accept": "application/json"}
     if payload is not None:
         import json
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as res:
-            raw = res.read().decode("utf-8")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Rover camera service unavailable at {url}: {e}") from e
+
+    errors: list[str] = []
+    raw = ""
+    for base_url in _rover_camera_service_candidates():
+        url = base_url + path
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+                raw = res.read().decode("utf-8")
+            with _rover_camera_service_lock:
+                if _rover_camera_service_url != base_url:
+                    _rover_camera_service_url = base_url
+                    store.add_log("INFO", f"Using rover camera service at {base_url}", "camera")
+            break
+        except urllib.error.URLError as e:
+            errors.append(f"{url}: {e}")
+    else:
+        attempted = "; ".join(errors) if errors else "no rover camera service URLs configured"
+        raise RuntimeError(f"Rover camera service unavailable; tried {attempted}")
+
     if not raw:
         return {}
     import json

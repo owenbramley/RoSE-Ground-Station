@@ -92,7 +92,8 @@ def _get_local_ips() -> list[str]:
 
 def _get_camera_client_ip() -> str:
     """Return the ground-station address reachable from the rover camera service."""
-    rover_url = urllib.parse.urlparse(config.rover_camera_service_url)
+    rover_camera_service_url = config.rover_camera_service_urls[0] if config.rover_camera_service_urls else ""
+    rover_url = urllib.parse.urlparse(rover_camera_service_url)
     rover_host = rover_url.hostname
     rover_port = rover_url.port or 8765
     if rover_host:
@@ -493,7 +494,7 @@ async def lifespan(app: FastAPI):
         bridge.add_log("INFO", f"Listening on http://{ip}:{config.port}", "api")
     bridge.add_log(
         "INFO",
-        f"Ground station camera return address is {_get_camera_client_ip()} for {config.rover_camera_service_url}",
+        f"Ground station camera return address is {_get_camera_client_ip()} for {', '.join(config.rover_camera_service_urls)}",
         "camera",
     )
     t1 = asyncio.create_task(_telemetry_broadcast())

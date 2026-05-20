@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+set +u
 source /opt/ros/humble/setup.bash
+set -u
 
 if [ -n "${URC_ROS_WS:-}" ] && [ -f "${URC_ROS_WS}/install/setup.bash" ]; then
+  set +u
   source "${URC_ROS_WS}/install/setup.bash"
+  set -u
   echo "[pi-entrypoint] URC ROS2 workspace sourced from ${URC_ROS_WS}"
 fi
 

@@ -177,8 +177,10 @@ docker run -it --rm \
   -v /home/pi/urc_2026:/home/pi/urc_2026 \
   -v /home/pi/rose-ground-station:/workspace/rose-ground-station \
   rose-ground-station:pi \
-  bash -lc "source /opt/ros/humble/setup.bash && cd /home/pi/urc_2026 && rosdep update && rosdep install --from-paths src --ignore-src -r -y"
+  bash -lc "apt-get update && source /opt/ros/humble/setup.bash && cd /home/pi/urc_2026 && rosdep update && rosdep install --from-paths src --ignore-src -r -y"
 ```
+
+Run this inside the Docker container, not on the Raspberry Pi OS host. If `apt-get` says it cannot locate `ros-humble-*` packages, you are either outside the ROS Docker image or the container apt index needs `apt-get update`.
 
 ## 9. Test Controllers
 

@@ -927,7 +927,8 @@ class ROS2Bridge:
         res = _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id)}/start", payload, timeout=8.0)
         _start_udp_camera_receiver(camera_id, port)
         camera = res.get("camera", {"id": camera_id})
-        store.update_camera(camera_id, **camera, port=port, streaming=True)
+        camera.update(dict(port=port, streaming=True))
+        store.update_camera(camera_id, **camera)
         store.add_log("INFO", f"Started rover camera {camera_id} on UDP port {port}", "camera")
         return next((c for c in store.get_cameras() if c.get("id") == camera_id), {"id": camera_id})
 

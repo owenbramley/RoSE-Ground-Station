@@ -14,6 +14,7 @@ const state = {
   augerOn: false,
   hiddenCameras: new Set(),
   visibleCameras: new Set(),
+  cameraRotations: {},
   cameraVisibilitySaved: false,
   cameras: [],
   stillPausedCameras: [],
@@ -625,6 +626,7 @@ async function captureCameraStill(id) {
 // ══════════════════════════════════════════════════════════════
 
 function initCameras() {
+  loadCameraRotations();
   try {
     const raw = localStorage.getItem('rose_visible_cameras');
     state.cameraVisibilitySaved = raw !== null;
@@ -667,16 +669,52 @@ function retryCam(id) {
   img.src = withToken(`/api/camera/${encodeURIComponent(id)}`) + `&_=${Date.now()}`;
   img.classList.remove('hidden');
   err.classList.add('hidden');
+  applyCameraRotation(id);
 }
 
 function cameraName(id) {
   const cam = state.cameras.find(c => String(c.id) === String(id));
+  if (String(cam?.id) === 'video0' && String(cam?.label || '').includes('usb-3610000.usb-4.3.1.3')) {
+    return 'Chassis';
+  }
   return cam?.label || cam?.device || `Camera ${id}`;
 }
 
 function saveHiddenCameras() {
   state.cameraVisibilitySaved = true;
   localStorage.setItem('rose_visible_cameras', JSON.stringify([...state.visibleCameras]));
+}
+
+function loadCameraRotations() {
+  try {
+    const raw = localStorage.getItem('rose_camera_rotations');
+    const parsed = JSON.parse(raw || '{}');
+    state.cameraRotations = Object.fromEntries(
+      Object.entries(parsed).map(([id, deg]) => [String(id), Number(deg) || 0])
+    );
+  } catch (_) {
+    state.cameraRotations = {};
+  }
+}
+
+function saveCameraRotations() {
+  localStorage.setItem('rose_camera_rotations', JSON.stringify(state.cameraRotations));
+}
+
+function applyCameraRotation(id) {
+  const img = document.getElementById(`camImg-${cssSafeId(id)}`);
+  if (!img) return;
+  const deg = Number(state.cameraRotations[String(id)] || 0) % 360;
+  img.style.transform = deg ? `rotate(${deg}deg)` : '';
+}
+
+function rotateCamera(id) {
+  id = String(id);
+  const next = (Number(state.cameraRotations[id] || 0) + 90) % 360;
+  if (next) state.cameraRotations[id] = next;
+  else delete state.cameraRotations[id];
+  saveCameraRotations();
+  applyCameraRotation(id);
 }
 
 async function hideCamera(id) {
@@ -733,6 +771,7 @@ function renderCameraGrid() {
         <div class="camera-label">${escHtml(cameraName(id))}</div>
         <div class="camera-tools">
           <button class="camera-still-btn" data-camera-id="${escHtml(id)}" title="Capture HD still from ${escHtml(cameraName(id))}">Still</button>
+          <button class="camera-rotate-btn" data-camera-id="${escHtml(id)}" title="Rotate ${escHtml(cameraName(id))} camera 90 degrees">Rotate</button>
           <button class="camera-hide-btn" data-camera-id="${escHtml(id)}" title="Hide ${escHtml(cameraName(id))} camera">Hide</button>
         </div>
         <img class="camera-img" id="camImg-${safeId}" alt="${escHtml(cameraName(id))} camera" />
@@ -749,6 +788,9 @@ function renderCameraGrid() {
   grid.querySelectorAll('.camera-still-btn').forEach(btn => {
     btn.addEventListener('click', () => captureCameraStill(btn.dataset.cameraId));
   });
+  grid.querySelectorAll('.camera-rotate-btn').forEach(btn => {
+    btn.addEventListener('click', () => rotateCamera(btn.dataset.cameraId));
+  });
   state.cameras.forEach(cam => {
     const id = String(cam.id);
     const safeId = cssSafeId(id);
@@ -763,7 +805,9 @@ function renderCameraGrid() {
     img.addEventListener('load', () => {
       img.classList.remove('hidden');
       err.classList.add('hidden');
+      applyCameraRotation(id);
     });
+    applyCameraRotation(id);
     if (!state.hiddenCameras.has(id)) showCamera(id);
   });
 }

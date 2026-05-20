@@ -263,6 +263,7 @@ html, body {
   width: 100%; height: 100%;
   object-fit: cover;
   display: block;
+  transform-origin: center;
 }
 
 .camera-label {
@@ -281,6 +282,7 @@ html, body {
   gap: 6px;
 }
 .camera-hide-btn,
+.camera-rotate-btn,
 .camera-still-btn {
   background: rgba(0,0,0,0.65);
   color: var(--text);
@@ -292,6 +294,7 @@ html, body {
   cursor: pointer;
 }
 .camera-hide-btn:hover,
+.camera-rotate-btn:hover,
 .camera-still-btn:hover {
   color: var(--accent);
   border-color: var(--accent);

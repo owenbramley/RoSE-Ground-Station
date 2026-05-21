@@ -7,6 +7,7 @@
 // ── Constants ────────────────────────────────────────────────
 const WS_ORIGIN   = `ws://${location.host}`;
 const TOKEN_KEY   = 'rose_token';
+const CAMERA_DECODE_MODE_KEY = 'rose_camera_decode_mode';
 
 // ── Global state ─────────────────────────────────────────────
 const state = {
@@ -18,6 +19,9 @@ const state = {
   cameraStatuses: {},
   cameraStatusTimers: {},
   nativeCameras: new Set(),
+  nativeCameraUrls: {},
+  nativeCameraUrlIndex: {},
+  cameraDecodeMode: 'pi',
   cameraVisibilitySaved: false,
   cameras: [],
   stillPausedCameras: [],
@@ -639,6 +643,7 @@ async function captureCameraStill(id) {
 
 function initCameras() {
   loadCameraRotations();
+  loadCameraDecodeMode();
   try {
     const raw = localStorage.getItem('rose_visible_cameras');
     state.cameraVisibilitySaved = raw !== null;
@@ -651,9 +656,49 @@ function initCameras() {
 
   document.getElementById('refreshCamerasBtn')?.addEventListener('click', () => refreshCameras(true));
   document.getElementById('showAllCamerasBtn')?.addEventListener('click', showAllCameras);
+  document.querySelectorAll('.camera-decode-btn').forEach(btn => {
+    btn.addEventListener('click', () => setCameraDecodeMode(btn.dataset.decodeMode));
+  });
   document.getElementById('closeCameraStillModal')?.addEventListener('click', closeCameraStillModal);
+  renderCameraDecodeMode();
   refreshCameras(false).catch(() => renderCameraGrid());
   setInterval(refreshCameraStatus, 3000);
+}
+
+function loadCameraDecodeMode() {
+  const saved = localStorage.getItem(CAMERA_DECODE_MODE_KEY);
+  state.cameraDecodeMode = saved === 'browser' ? 'browser' : 'pi';
+}
+
+function renderCameraDecodeMode() {
+  document.querySelectorAll('.camera-decode-btn').forEach(btn => {
+    const active = btn.dataset.decodeMode === state.cameraDecodeMode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  updateCameraDecodeButtons();
+}
+
+function updateCameraDecodeButtons() {
+  document.querySelectorAll('.camera-native-btn').forEach(btn => {
+    const browserMode = state.cameraDecodeMode === 'browser';
+    btn.textContent = browserMode ? 'Use Pi' : 'Use Browser';
+    btn.title = browserMode
+      ? `Switch camera streams back to Raspberry Pi decode`
+      : `Switch camera streams to browser decode on this computer`;
+  });
+}
+
+function setCameraDecodeMode(mode) {
+  mode = mode === 'browser' ? 'browser' : 'pi';
+  if (state.cameraDecodeMode === mode) return;
+  state.cameraDecodeMode = mode;
+  localStorage.setItem(CAMERA_DECODE_MODE_KEY, mode);
+  renderCameraDecodeMode();
+  const visibleIds = state.cameras
+    .map(cam => String(cam.id))
+    .filter(id => !state.hiddenCameras.has(id));
+  visibleIds.forEach(id => showCamera(id, { quiet: true, forceMode: mode }));
 }
 
 async function refreshCameras(force = true) {
@@ -712,6 +757,8 @@ function retryCam(id) {
 function stopNativeCamera(id) {
   id = String(id);
   state.nativeCameras.delete(id);
+  delete state.nativeCameraUrls[id];
+  delete state.nativeCameraUrlIndex[id];
   const safeId = cssSafeId(id);
   const video = document.getElementById(`camVideo-${safeId}`);
   const img = document.getElementById(`camImg-${safeId}`);
@@ -725,6 +772,19 @@ function stopNativeCamera(id) {
     img.src = '';
     img.classList.remove('hidden');
   }
+}
+
+function setNativeCameraSource(id, index = 0) {
+  id = String(id);
+  const urls = state.nativeCameraUrls[id] || [];
+  const url = urls[index];
+  const img = document.getElementById(`camImg-${cssSafeId(id)}`);
+  if (!url || !img) return false;
+  state.nativeCameraUrlIndex[id] = index;
+  const sep = url.includes('?') ? '&' : '?';
+  img.src = `${url}${sep}_=${Date.now()}`;
+  img.classList.remove('hidden');
+  return true;
 }
 
 function cameraName(id) {
@@ -847,6 +907,10 @@ async function hideCamera(id) {
 
 async function showCamera(id, options = {}) {
   id = String(id);
+  const mode = options.forceMode || state.cameraDecodeMode;
+  if (mode === 'browser') {
+    return startBrowserCamera(id, options);
+  }
   stopNativeCamera(id);
   state.hiddenCameras.delete(id);
   state.visibleCameras.add(id);
@@ -867,35 +931,46 @@ async function showCamera(id, options = {}) {
   }
 }
 
-async function showNativeCamera(id) {
+async function startBrowserCamera(id, options = {}) {
   id = String(id);
   const safeId = cssSafeId(id);
   const img = document.getElementById(`camImg-${safeId}`);
   if (!img) return;
 
-  if (state.nativeCameras.has(id)) {
-    stopNativeCamera(id);
-    showCamera(id, { quiet: true });
-    return;
-  }
-
   clearCameraStatusTimer(id);
-  setCameraStatus(id, 'starting', 'Starting native stream', 'Stopping the RPi MJPEG receiver and asking the browser to decode the rover H.264 stream directly.');
-  try {
-    await apiFetch(`/api/camera/${encodeURIComponent(id)}/stop`, { method: 'POST' });
-  } catch (_) {}
+  state.hiddenCameras.delete(id);
+  state.visibleCameras.add(id);
+  if (options.persist !== false) saveHiddenCameras();
+  renderCameraVisibility();
+  setCameraStatus(id, 'starting', 'Starting browser decode', 'Stopping the RPi receiver and connecting this browser directly to the rover MJPEG stream.');
 
   try {
     const res = await apiFetch(`/api/camera/${encodeURIComponent(id)}/native`, { method: 'POST' });
+    const urls = Array.isArray(res.urls) && res.urls.length ? res.urls : [res.url].filter(Boolean);
+    if (!urls.length) throw new Error('Rover camera service did not return a browser stream URL');
     state.nativeCameras.add(id);
-    img.src = `${res.url}?_=${Date.now()}`;
-    img.classList.remove('hidden');
-    setCameraStatus(id, 'connecting', 'Native stream requested', 'The browser is connecting directly to the rover camera service. Decode should happen on this device, not on the RPi.');
+    state.nativeCameraUrls[id] = urls;
+    setNativeCameraSource(id, 0);
+    setCameraStatus(id, 'connecting', 'Browser stream requested', 'This browser is connecting directly to the rover camera service. JPEG decode happens on this computer, not on the RPi.');
   } catch (err) {
     stopNativeCamera(id);
-    setCameraStatus(id, 'error', 'Native stream failed', err.message);
-    showToast('error', 'Native Camera Failed', err.message);
+    setCameraStatus(id, 'error', 'Browser stream failed', err.message);
+    if (!options.quiet) showToast('error', 'Browser Camera Failed', err.message);
   }
+}
+
+async function showNativeCamera(id) {
+  const nextMode = state.cameraDecodeMode === 'browser' ? 'pi' : 'browser';
+  setCameraDecodeMode(nextMode);
+  if (state.cameras.length <= 1) return;
+  showToast(
+    'info',
+    'Camera Decode Mode Changed',
+    nextMode === 'browser'
+      ? 'Visible cameras are now using direct browser decode.'
+      : 'Visible cameras are now using Raspberry Pi decode.',
+    2500
+  );
 }
 
 async function saveCameraLabel(id, label) {
@@ -945,7 +1020,7 @@ function renderCameraGrid() {
         <input class="camera-label-input" id="camLabel-${safeId}" data-camera-id="${escHtml(id)}" value="${escHtml(cameraName(id))}" title="Edit camera name" />
         <div class="camera-tools">
           <button class="camera-still-btn" data-camera-id="${escHtml(id)}" title="Capture HD still from ${escHtml(cameraName(id))}">Still</button>
-          <button class="camera-native-btn" data-camera-id="${escHtml(id)}" title="Experimental native browser decode for ${escHtml(cameraName(id))}">Native</button>
+          <button class="camera-native-btn" data-camera-id="${escHtml(id)}" title="Switch decode mode for ${escHtml(cameraName(id))}">Use Browser</button>
           <button class="camera-rotate-btn" data-camera-id="${escHtml(id)}" title="Rotate ${escHtml(cameraName(id))} camera 90 degrees">Rotate</button>
           <button class="camera-hide-btn" data-camera-id="${escHtml(id)}" title="Hide ${escHtml(cameraName(id))} camera">Hide</button>
         </div>
@@ -983,33 +1058,42 @@ function renderCameraGrid() {
     const video = document.getElementById(`camVideo-${safeId}`);
     if (!img) return;
     img.addEventListener('error', () => {
-      if (state.nativeCameras.has(id)) return;
       clearCameraStatusTimer(id);
+      if (state.nativeCameras.has(id)) {
+        const nextIndex = Number(state.nativeCameraUrlIndex[id] || 0) + 1;
+        if (setNativeCameraSource(id, nextIndex)) {
+          setCameraStatus(id, 'connecting', 'Trying alternate browser stream', 'The first direct rover URL was not reachable from this computer, so the browser is trying another discovered camera-service address.');
+          return;
+        }
+        setCameraStatus(id, 'error', 'Browser feed unavailable', 'This computer could not read the direct rover MJPEG stream. Switch back to Pi Decode or check rover camera service access.');
+        return;
+      }
       setCameraStatus(id, 'error', 'Feed unavailable', 'The browser could not read the MJPEG stream. Retrying while the camera remains visible.');
       if (!state.hiddenCameras.has(id)) setTimeout(() => retryCam(id), 3000);
     });
     img.addEventListener('load', () => {
       clearCameraStatusTimer(id);
-      setCameraStatus(id, 'live', state.nativeCameras.has(id) ? 'Native decode' : 'Live', '');
+      setCameraStatus(id, 'live', state.nativeCameras.has(id) ? 'Browser decode' : 'Pi decode', '');
       applyCameraRotation(id);
     });
     if (video) {
       video.addEventListener('canplay', () => {
         clearCameraStatusTimer(id);
-        setCameraStatus(id, 'live', 'Native decode', 'This browser is decoding the rover stream directly.');
+        setCameraStatus(id, 'live', 'Browser decode', 'This browser is decoding the rover stream directly.');
       });
       video.addEventListener('error', () => {
         if (!state.nativeCameras.has(id)) return;
         clearCameraStatusTimer(id);
-        setCameraStatus(id, 'error', 'Native feed unavailable', 'The browser could not play the direct rover stream. Switch back to MJPEG or restart the rover camera service.');
+        setCameraStatus(id, 'error', 'Browser feed unavailable', 'The browser could not play the direct rover stream. Switch back to Pi Decode or restart the rover camera service.');
       });
     }
     applyCameraRotation(id);
     if (!state.hiddenCameras.has(id)) {
       setCameraStatus(id, 'idle', 'Preparing stream', 'Waiting to request this rover camera stream.');
-      if (!state.nativeCameras.has(id)) showCamera(id);
+      showCamera(id);
     }
   });
+  updateCameraDecodeButtons();
 }
 
 function renderCameraVisibility() {

@@ -890,10 +890,10 @@ async def start_camera(camera_id: str, _token: str = Depends(require_auth)):
 @app.post("/api/camera/{camera_id}/native")
 async def native_camera(camera_id: str, _token: str = Depends(require_auth)):
     try:
-        url = bridge.native_camera_url(camera_id)
+        stream = bridge.native_camera(camera_id)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    return {"url": url, "camera_id": str(camera_id), "transport": "direct-mjpeg"}
+    return stream
 
 
 @app.post("/api/camera/{camera_id}/stop")

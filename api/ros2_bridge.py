@@ -1006,13 +1006,48 @@ class ROS2Bridge:
     def set_camera_label(self, camera_id: str, label: str):
         store.set_camera_label(camera_id, label)
 
-    def native_camera_url(self, camera_id: str) -> str:
-        with _rover_camera_service_lock:
-            has_cached_url = bool(_rover_camera_service_url)
-        if not has_cached_url:
-            _rover_request("GET", "/cameras", timeout=3.0)
+    def native_camera(self, camera_id: str) -> dict:
+        camera_id = str(camera_id)
+        if config.camera_source != "udp":
+            raise RuntimeError("Browser decode is only available when GS_CAMERA_SOURCE=udp")
+
+        res = _rover_request("GET", "/cameras", timeout=5.0)
+        cameras = res.get("cameras", [])
+        store.set_cameras(cameras)
+        camera = next((c for c in store.get_cameras() if str(c.get("id")) == camera_id), None)
+        if not camera:
+            raise RuntimeError(f"Camera {camera_id} not found")
+
+        with _receiver_lock:
+            receiver_active = camera_id in _receiver_stop_events
+        if camera.get("streaming") or receiver_active:
+            try:
+                _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id, safe='')}/stop", {}, timeout=3.0)
+            except RuntimeError as e:
+                store.add_log("WARN", f"Could not stop rover UDP stream before browser decode: {e}", "camera")
+
+        _stop_udp_camera_receiver(camera_id)
+        store.update_camera(camera_id, streaming=False, stream_budget=None, transport="direct-mjpeg")
+        store.clear_camera_frame(camera_id)
+
         base_url = _active_rover_camera_service_url()
-        return f"{base_url}/cameras/{urllib.parse.quote(str(camera_id))}/native.mjpg"
+        url = f"{base_url}/cameras/{urllib.parse.quote(camera_id, safe='')}/native.mjpg"
+        urls = [
+            f"{candidate}/cameras/{urllib.parse.quote(camera_id, safe='')}/native.mjpg"
+            for candidate in _rover_camera_service_candidates()
+        ]
+        store.add_log("INFO", f"Prepared camera {camera_id} for direct browser MJPEG decode", "camera")
+        return {
+            "url": url,
+            "urls": urls,
+            "camera_id": camera_id,
+            "transport": "direct-mjpeg",
+            "content_type": "multipart/x-mixed-replace",
+            "proxied": False,
+        }
+
+    def native_camera_url(self, camera_id: str) -> str:
+        return self.native_camera(camera_id)["url"]
 
     def refresh_cameras(self) -> list[dict]:
         if config.camera_source == "ros2":

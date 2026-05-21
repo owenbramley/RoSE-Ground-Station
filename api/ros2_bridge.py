@@ -508,6 +508,16 @@ def _rover_request(method: str, path: str, payload: Optional[dict] = None, timeo
     import json
     return json.loads(raw)
 
+
+def _active_rover_camera_service_url() -> str:
+    with _rover_camera_service_lock:
+        if _rover_camera_service_url:
+            return _rover_camera_service_url
+    candidates = _rover_camera_service_candidates()
+    if not candidates:
+        raise RuntimeError("No rover camera service URL configured")
+    return candidates[0]
+
 def _gst_udp_h264_pipeline(port: int) -> str:
     low_latency_queue = "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream"
     return (
@@ -995,6 +1005,14 @@ class ROS2Bridge:
 
     def set_camera_label(self, camera_id: str, label: str):
         store.set_camera_label(camera_id, label)
+
+    def native_camera_url(self, camera_id: str) -> str:
+        with _rover_camera_service_lock:
+            has_cached_url = bool(_rover_camera_service_url)
+        if not has_cached_url:
+            _rover_request("GET", "/cameras", timeout=3.0)
+        base_url = _active_rover_camera_service_url()
+        return f"{base_url}/cameras/{urllib.parse.quote(str(camera_id))}/native.mjpg"
 
     def refresh_cameras(self) -> list[dict]:
         if config.camera_source == "ros2":

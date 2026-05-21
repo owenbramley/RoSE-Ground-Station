@@ -44,7 +44,7 @@ class Config:
         if url.strip()
     ])
     rover_camera_service_port: int = field(default_factory=lambda: int(os.environ.get("GS_ROVER_CAMERA_SERVICE_PORT", "8765")))
-    rover_camera_max_fps: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_FPS", "15")))
+    rover_camera_max_fps: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_FPS", "10")))
     rover_camera_min_fps: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MIN_FPS", "5")))
     rover_camera_max_width: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_WIDTH", "4096")))
     rover_camera_max_height: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_HEIGHT", "2160")))
@@ -55,7 +55,7 @@ class Config:
     rover_camera_max_total_bitrate: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_TOTAL_BITRATE", "1600")))
     rover_camera_still_max_width: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_STILL_MAX_WIDTH", "1920")))
     rover_camera_still_max_height: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_STILL_MAX_HEIGHT", "1080")))
-    camera_udp_buffer_size: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_UDP_BUFFER_SIZE", "65536")))
+    camera_udp_buffer_size: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_UDP_BUFFER_SIZE", "262144")))
 
     # ROS2 topics — sensors
     gnss_topic: str = "/gnss/fix"
@@ -115,8 +115,8 @@ class Config:
     )
 
     # Browser MJPEG quality
-    jpeg_quality: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_JPEG_QUALITY", "70")))
-    camera_fps: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_BROWSER_FPS", "15")))
+    jpeg_quality: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_JPEG_QUALITY", "60")))
+    camera_fps: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_BROWSER_FPS", "10")))
 
 
 config = Config()

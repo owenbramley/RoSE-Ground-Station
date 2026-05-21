@@ -993,6 +993,9 @@ class ROS2Bridge:
     def get_cameras(self) -> list[dict]:
         return store.get_cameras()
 
+    def set_camera_label(self, camera_id: str, label: str):
+        store.set_camera_label(camera_id, label)
+
     def refresh_cameras(self) -> list[dict]:
         if config.camera_source == "ros2":
             cameras = []

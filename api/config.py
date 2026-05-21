@@ -52,9 +52,10 @@ class Config:
     rover_camera_min_height: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MIN_HEIGHT", "240")))
     rover_camera_bitrate: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_BITRATE", "800")))
     rover_camera_min_bitrate: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MIN_BITRATE", "250")))
-    rover_camera_max_total_bitrate: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_TOTAL_BITRATE", "0")))
+    rover_camera_max_total_bitrate: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_TOTAL_BITRATE", "1600")))
     rover_camera_still_max_width: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_STILL_MAX_WIDTH", "1920")))
     rover_camera_still_max_height: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_STILL_MAX_HEIGHT", "1080")))
+    camera_udp_buffer_size: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_UDP_BUFFER_SIZE", "65536")))
 
     # ROS2 topics — sensors
     gnss_topic: str = "/gnss/fix"
@@ -85,6 +86,9 @@ class Config:
     network_config_path: str = field(
         default_factory=lambda: os.environ.get("GS_NETWORK_CONFIG_PATH", "data/network_config.json")
     )
+    camera_labels_path: str = field(
+        default_factory=lambda: os.environ.get("GS_CAMERA_LABELS_PATH", "data/camera_labels.json")
+    )
     rocket_snmp_community: str = field(default_factory=lambda: os.environ.get("GS_ROCKET_SNMP_COMMUNITY", "public"))
     rocket_poll_timeout_s: float = field(default_factory=lambda: float(os.environ.get("GS_ROCKET_POLL_TIMEOUT_S", "1.2")))
 
@@ -110,9 +114,9 @@ class Config:
         default_factory=lambda: WarningLevel(warning=60.0, critical=80.0)
     )
 
-    # MJPEG quality
-    jpeg_quality: int = 80
-    camera_fps: int = 25
+    # Browser MJPEG quality
+    jpeg_quality: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_JPEG_QUALITY", "70")))
+    camera_fps: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_BROWSER_FPS", "15")))
 
 
 config = Config()

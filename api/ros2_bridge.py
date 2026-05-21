@@ -263,6 +263,15 @@ class _DataStore:
         with self._lock:
             return [dict(v) for v in sorted(self.cameras.values(), key=lambda c: str(c.get("label") or c.get("id")))]
 
+    def set_camera_label(self, camera_id: str, label: str):
+        with self._lock:
+            camera_id = str(camera_id)
+            camera = dict(self.cameras.get(camera_id, {"id": camera_id}))
+            camera["label"] = label
+            camera["custom_label"] = label
+            self.cameras[camera_id] = camera
+            self.camera_frames.setdefault(camera_id, None)
+
     def get_telemetry(self) -> dict:
         with self._lock:
             return dict(self.telemetry)
@@ -467,6 +476,7 @@ def _rover_camera_service_candidates() -> list[str]:
 
 
 def _rover_request(method: str, path: str, payload: Optional[dict] = None, timeout: float = 3.0) -> dict:
+    global _rover_camera_service_url
     data = None
     headers = {"Accept": "application/json"}
     if payload is not None:
@@ -499,30 +509,51 @@ def _rover_request(method: str, path: str, payload: Optional[dict] = None, timeo
     return json.loads(raw)
 
 def _gst_udp_h264_pipeline(port: int) -> str:
+    low_latency_queue = "queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream"
     return (
-        f"udpsrc port={port} "
+        f"udpsrc port={port} buffer-size={config.camera_udp_buffer_size} "
         'caps="application/x-rtp,media=video,encoding-name=H264,payload=96" ! '
+        f"{low_latency_queue} ! "
         "rtph264depay ! "
+        f"{low_latency_queue} ! "
         "h264parse ! "
+        f"{low_latency_queue} ! "
         "avdec_h264 ! "
+        f"{low_latency_queue} ! "
         "videoconvert ! "
         "appsink drop=true max-buffers=1 sync=false"
     )
 
 
 def _gst_udp_jpeg_command(port: int) -> list[str]:
+    low_latency_queue = [
+        "queue",
+        "max-size-buffers=1",
+        "max-size-bytes=0",
+        "max-size-time=0",
+        "leaky=downstream",
+    ]
     return [
         "gst-launch-1.0",
         "-q",
         "udpsrc",
         f"port={port}",
+        f"buffer-size={config.camera_udp_buffer_size}",
         "caps=application/x-rtp,media=video,encoding-name=H264,payload=96",
+        "!",
+        *low_latency_queue,
         "!",
         "rtph264depay",
         "!",
+        *low_latency_queue,
+        "!",
         "h264parse",
         "!",
+        *low_latency_queue,
+        "!",
         "avdec_h264",
+        "!",
+        *low_latency_queue,
         "!",
         "videoconvert",
         "!",
@@ -655,7 +686,13 @@ def _camera_stream_budget(stream_count: int) -> dict:
     max_bitrate = max(1, int(config.rover_camera_bitrate))
     total_bitrate = max(0, int(config.rover_camera_max_total_bitrate))
     if total_bitrate:
-        bitrate = min(max_bitrate, max(int(config.rover_camera_min_bitrate), total_bitrate // stream_count))
+        fair_share = max(1, total_bitrate // stream_count)
+        preferred_min = max(1, int(config.rover_camera_min_bitrate))
+        # The global camera budget protects rover control traffic, so it must
+        # win over the per-stream minimum when many cameras are active.
+        bitrate = min(max_bitrate, fair_share)
+        if fair_share >= preferred_min:
+            bitrate = max(preferred_min, bitrate)
     else:
         bitrate = max_bitrate
 
@@ -984,13 +1021,9 @@ class ROS2Bridge:
         res = _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id)}/start", payload, timeout=8.0)
         _start_udp_camera_receiver(camera_id, port)
         camera = res.get("camera", {"id": camera_id})
-<<<<<<< Updated upstream
-        camera.update(dict(port=port, streaming=True))
-        store.update_camera(camera_id, **camera)
-        store.add_log("INFO", f"Started rover camera {camera_id} on UDP port {port}", "camera")
-=======
         budget = _camera_stream_budget(stream_count)
-        store.update_camera(camera_id, **camera, port=port, streaming=True, stream_budget=budget)
+        camera.update({"port": port, "streaming": True, "stream_budget": budget})
+        store.update_camera(camera_id, **camera)
         self._rebalance_udp_camera_streams(client_ip)
         store.add_log(
             "INFO",
@@ -998,7 +1031,6 @@ class ROS2Bridge:
             f"{payload['max_width']}x{payload['max_height']} {payload['max_fps']} fps, {payload['bitrate']} kbps",
             "camera",
         )
->>>>>>> Stashed changes
         return next((c for c in store.get_cameras() if c.get("id") == camera_id), {"id": camera_id})
 
     def stop_camera(self, camera_id: str) -> dict:
@@ -1030,7 +1062,8 @@ class ROS2Bridge:
                 res = _rover_request("POST", f"/cameras/{urllib.parse.quote(active_id)}/start", payload, timeout=8.0)
                 _start_udp_camera_receiver(active_id, int(payload["port"]))
                 camera = res.get("camera", {"id": active_id})
-                store.update_camera(active_id, **camera, port=int(payload["port"]), streaming=True, stream_budget=budget)
+                camera.update({"port": int(payload["port"]), "streaming": True, "stream_budget": budget})
+                store.update_camera(active_id, **camera)
             except RuntimeError as e:
                 store.add_log("WARN", f"Could not rebalance camera {active_id}: {e}", "camera")
 

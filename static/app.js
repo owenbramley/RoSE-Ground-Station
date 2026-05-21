@@ -15,6 +15,8 @@ const state = {
   hiddenCameras: new Set(),
   visibleCameras: new Set(),
   cameraRotations: {},
+  cameraStatuses: {},
+  cameraStatusTimers: {},
   cameraVisibilitySaved: false,
   cameras: [],
   stillPausedCameras: [],
@@ -143,6 +145,7 @@ function escHtml(s) {
 async function apiFetch(path, options = {}) {
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), 8000);
+  const method = (options.method || 'GET').toUpperCase();
   try {
     const headers = { ...(options.headers || {}) };
     const token = getToken();
@@ -159,13 +162,21 @@ async function apiFetch(path, options = {}) {
 
     if (!res.ok) {
       let detail = `HTTP ${res.status}`;
-      try { const j = await res.json(); detail = j.detail || detail; } catch (_) {}
-      throw new Error(detail);
+      try {
+        const j = await res.json();
+        detail = j.detail || j.error || detail;
+      } catch (_) {
+        try {
+          const text = await res.text();
+          if (text) detail = text.slice(0, 500);
+        } catch (_) {}
+      }
+      throw new Error(`${method} ${path} failed: ${detail}`);
     }
     return await res.json();
   } catch (err) {
     clearTimeout(timeout);
-    if (err.name === 'AbortError') throw new Error('Request timed out');
+    if (err.name === 'AbortError') throw new Error(`${method} ${path} timed out after 8 seconds`);
     throw err;
   }
 }
@@ -641,9 +652,11 @@ function initCameras() {
   document.getElementById('showAllCamerasBtn')?.addEventListener('click', showAllCameras);
   document.getElementById('closeCameraStillModal')?.addEventListener('click', closeCameraStillModal);
   refreshCameras(false).catch(() => renderCameraGrid());
+  setInterval(refreshCameraStatus, 3000);
 }
 
 async function refreshCameras(force = true) {
+  const priorIds = cameraIdsSignature();
   let res;
   try {
     res = force
@@ -655,29 +668,106 @@ async function refreshCameras(force = true) {
   }
   state.cameras = res.cameras || [];
   const known = new Set(state.cameras.map(cam => String(cam.id)));
+  if (!state.cameraVisibilitySaved) {
+    state.visibleCameras = new Set(state.cameras.map(cam => String(cam.id)));
+  }
   state.hiddenCameras = new Set(state.cameras.map(cam => String(cam.id)).filter(id => !state.visibleCameras.has(id)));
   state.visibleCameras = new Set([...state.visibleCameras].filter(id => known.has(id)));
-  renderCameraGrid();
+  const nextIds = cameraIdsSignature();
+  if (priorIds !== nextIds || force) renderCameraGrid();
+  else updateCameraLabels();
   renderCameraVisibility();
+}
+
+async function refreshCameraStatus() {
+  if (!state.cameras.length) return;
+  try {
+    const res = await apiFetch('/api/cameras');
+    state.cameras = res.cameras || [];
+    updateCameraLabels();
+    renderCameraVisibility();
+    state.cameras.forEach(cam => updateCameraStatusFromMetadata(String(cam.id), cam));
+  } catch (_) {}
+}
+
+function cameraIdsSignature() {
+  return state.cameras.map(cam => String(cam.id)).sort().join('|');
 }
 
 function retryCam(id) {
   const safeId = cssSafeId(id);
   const img = document.getElementById(`camImg-${safeId}`);
-  const err = document.getElementById(`camErr-${safeId}`);
-  if (!img || !err) return;
+  if (!img) return;
+  clearCameraStatusTimer(id);
+  setCameraStatus(id, 'connecting', 'Waiting for video frames', 'Ground station MJPEG endpoint is open. Waiting for the first JPEG frame from the rover receiver.');
   img.src = withToken(`/api/camera/${encodeURIComponent(id)}`) + `&_=${Date.now()}`;
-  img.classList.remove('hidden');
-  err.classList.add('hidden');
+  state.cameraStatusTimers[id] = setTimeout(() => {
+    setCameraStatus(id, 'waiting', 'No frame received yet', 'The stream request was sent, but no decoded JPEG frame has reached the browser. Check rover camera process, Rocket M2 congestion, or packet loss.');
+  }, 6000);
   applyCameraRotation(id);
 }
 
 function cameraName(id) {
   const cam = state.cameras.find(c => String(c.id) === String(id));
-  if (String(cam?.id) === 'video0' && String(cam?.label || '').includes('usb-3610000.usb-4.3.1.3')) {
-    return 'Chassis';
-  }
   return cam?.label || cam?.device || `Camera ${id}`;
+}
+
+function updateCameraLabels() {
+  state.cameras.forEach(cam => {
+    const id = String(cam.id);
+    const input = document.getElementById(`camLabel-${cssSafeId(id)}`);
+    if (input && document.activeElement !== input) input.value = cameraName(id);
+  });
+}
+
+function cameraStatusDetail(cam) {
+  if (!cam) return 'Camera has not been discovered by the rover service yet.';
+  const bits = [];
+  if (cam.port) bits.push(`UDP ${cam.port}`);
+  if (cam.mode?.width && cam.mode?.height) bits.push(`${cam.mode.width}x${cam.mode.height}`);
+  if (cam.mode?.fps) bits.push(`${cam.mode.fps} fps`);
+  if (cam.bitrate || cam.stream_budget?.bitrate) bits.push(`${cam.bitrate || cam.stream_budget.bitrate} kbps`);
+  if (cam.stream_budget?.total_bitrate) bits.push(`shared cap ${cam.stream_budget.total_bitrate} kbps`);
+  return bits.length ? bits.join(' · ') : 'Stream is active, waiting for frame metadata.';
+}
+
+function clearCameraStatusTimer(id) {
+  if (state.cameraStatusTimers[id]) clearTimeout(state.cameraStatusTimers[id]);
+  delete state.cameraStatusTimers[id];
+}
+
+function setCameraStatus(id, level, title, detail = '') {
+  state.cameraStatuses[String(id)] = { level, title, detail };
+  renderCameraStatus(id);
+}
+
+function renderCameraStatus(id) {
+  const status = state.cameraStatuses[String(id)];
+  const overlay = document.getElementById(`camStatus-${cssSafeId(id)}`);
+  if (!overlay) return;
+  if (!status || status.level === 'live') {
+    overlay.classList.add('hidden');
+    return;
+  }
+  overlay.classList.remove('hidden');
+  overlay.dataset.level = status.level;
+  overlay.innerHTML = `
+    <div class="camera-spinner" aria-hidden="true"></div>
+    <div class="camera-status-title">${escHtml(status.title)}</div>
+    <div class="camera-status-detail">${escHtml(status.detail)}</div>
+  `;
+}
+
+function updateCameraStatusFromMetadata(id, cam) {
+  const img = document.getElementById(`camImg-${cssSafeId(id)}`);
+  if (!img || state.hiddenCameras.has(String(id))) return;
+  if (!cam?.streaming) {
+    setCameraStatus(id, 'idle', 'Stream stopped', 'This camera is visible in the grid but the rover stream is not active yet.');
+    return;
+  }
+  if (!img.complete || !img.naturalWidth) {
+    setCameraStatus(id, 'connecting', 'Connecting to stream', cameraStatusDetail(cam));
+  }
 }
 
 function saveHiddenCameras() {
@@ -723,6 +813,7 @@ async function hideCamera(id) {
   state.visibleCameras.delete(id);
   saveHiddenCameras();
   renderCameraVisibility();
+  setCameraStatus(id, 'idle', 'Camera hidden', 'The rover stream is being stopped to save bandwidth.');
   try {
     await apiFetch(`/api/camera/${encodeURIComponent(id)}/stop`, { method: 'POST' });
   } catch (err) {
@@ -736,11 +827,38 @@ async function showCamera(id, options = {}) {
   state.visibleCameras.add(id);
   if (options.persist !== false) saveHiddenCameras();
   renderCameraVisibility();
+  setCameraStatus(id, 'starting', 'Requesting rover stream', 'Ground station is asking the rover camera service to start or rebalance this stream.');
   try {
-    await apiFetch(`/api/camera/${encodeURIComponent(id)}/start`, { method: 'POST' });
+    const res = await apiFetch(`/api/camera/${encodeURIComponent(id)}/start`, { method: 'POST' });
+    const camera = res.camera;
+    if (camera) {
+      state.cameras = state.cameras.map(cam => String(cam.id) === id ? { ...cam, ...camera } : cam);
+    }
+    setCameraStatus(id, 'connecting', 'Stream requested', cameraStatusDetail(camera));
     retryCam(id);
   } catch (err) {
+    setCameraStatus(id, 'error', 'Camera start failed', err.message);
     if (!options.quiet) showToast('error', 'Camera Start Failed', err.message);
+  }
+}
+
+async function saveCameraLabel(id, label) {
+  id = String(id);
+  const clean = String(label || '').trim();
+  try {
+    const res = await apiFetch(`/api/camera/${encodeURIComponent(id)}/label`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: clean }),
+    });
+    if (res.camera) {
+      state.cameras = state.cameras.map(cam => String(cam.id) === id ? { ...cam, ...res.camera } : cam);
+    }
+    updateCameraLabels();
+    renderCameraVisibility();
+    showToast('success', 'Camera Name Saved', `${cameraName(id)} will persist on this ground station.`, 2500);
+  } catch (err) {
+    showToast('error', 'Camera Name Save Failed', err.message, 0);
   }
 }
 
@@ -768,20 +886,26 @@ function renderCameraGrid() {
     const safeId = cssSafeId(id);
     return `
       <div class="camera-cell" id="cam-${safeId}" data-camera-id="${escHtml(id)}">
-        <div class="camera-label">${escHtml(cameraName(id))}</div>
+        <input class="camera-label-input" id="camLabel-${safeId}" data-camera-id="${escHtml(id)}" value="${escHtml(cameraName(id))}" title="Edit camera name" />
         <div class="camera-tools">
           <button class="camera-still-btn" data-camera-id="${escHtml(id)}" title="Capture HD still from ${escHtml(cameraName(id))}">Still</button>
           <button class="camera-rotate-btn" data-camera-id="${escHtml(id)}" title="Rotate ${escHtml(cameraName(id))} camera 90 degrees">Rotate</button>
           <button class="camera-hide-btn" data-camera-id="${escHtml(id)}" title="Hide ${escHtml(cameraName(id))} camera">Hide</button>
         </div>
         <img class="camera-img" id="camImg-${safeId}" alt="${escHtml(cameraName(id))} camera" />
-        <div class="camera-error hidden" id="camErr-${safeId}">
-          <span class="cam-err-icon">⊗</span>
-          <span>Feed unavailable</span>
-        </div>
+        <div class="camera-status" id="camStatus-${safeId}" data-level="idle"></div>
       </div>
     `;
   }).join('');
+  grid.querySelectorAll('.camera-label-input').forEach(input => {
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        input.blur();
+      }
+    });
+    input.addEventListener('blur', () => saveCameraLabel(input.dataset.cameraId, input.value));
+  });
   grid.querySelectorAll('.camera-hide-btn').forEach(btn => {
     btn.addEventListener('click', () => hideCamera(btn.dataset.cameraId));
   });
@@ -795,20 +919,22 @@ function renderCameraGrid() {
     const id = String(cam.id);
     const safeId = cssSafeId(id);
     const img = document.getElementById(`camImg-${safeId}`);
-    const err = document.getElementById(`camErr-${safeId}`);
-    if (!img || !err) return;
+    if (!img) return;
     img.addEventListener('error', () => {
-      img.classList.add('hidden');
-      err.classList.remove('hidden');
+      clearCameraStatusTimer(id);
+      setCameraStatus(id, 'error', 'Feed unavailable', 'The browser could not read the MJPEG stream. Retrying while the camera remains visible.');
       if (!state.hiddenCameras.has(id)) setTimeout(() => retryCam(id), 3000);
     });
     img.addEventListener('load', () => {
-      img.classList.remove('hidden');
-      err.classList.add('hidden');
+      clearCameraStatusTimer(id);
+      setCameraStatus(id, 'live', 'Live', '');
       applyCameraRotation(id);
     });
     applyCameraRotation(id);
-    if (!state.hiddenCameras.has(id)) showCamera(id);
+    if (!state.hiddenCameras.has(id)) {
+      setCameraStatus(id, 'idle', 'Preparing stream', 'Waiting to request this rover camera stream.');
+      showCamera(id);
+    }
   });
 }
 

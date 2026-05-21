@@ -469,6 +469,47 @@ def _save_network_config(req: NetworkConfig) -> NetworkConfig:
     return clean
 
 
+def _camera_labels_path() -> Path:
+    path = Path(config.camera_labels_path)
+    if not path.is_absolute():
+        path = Path(__file__).parent.parent / path
+    return path
+
+
+def _load_camera_labels() -> dict[str, str]:
+    path = _camera_labels_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    labels: dict[str, str] = {}
+    for camera_id, label in raw.items():
+        clean_id = str(camera_id).strip()
+        clean_label = str(label).strip()
+        if clean_id and clean_label:
+            labels[clean_id] = clean_label[:80]
+    return labels
+
+
+def _save_camera_labels(labels: dict[str, str]) -> dict[str, str]:
+    path = _camera_labels_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(labels, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return labels
+
+
+def _apply_camera_labels(cameras: list[dict]) -> list[dict]:
+    labels = _load_camera_labels()
+    for camera in cameras:
+        camera_id = str(camera.get("id") or "")
+        if camera_id in labels:
+            camera["label"] = labels[camera_id]
+            camera["custom_label"] = labels[camera_id]
+    return cameras
+
+
 def _safe_host(host: str) -> str:
     host = host.strip()
     if not host:
@@ -803,7 +844,7 @@ async def list_cameras(
         cameras = bridge.refresh_cameras() if refresh else bridge.get_cameras()
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    return {"cameras": cameras}
+    return {"cameras": _apply_camera_labels(cameras)}
 
 
 @app.post("/api/cameras/refresh")
@@ -812,7 +853,29 @@ async def refresh_cameras(_token: str = Depends(require_auth)):
         cameras = bridge.refresh_cameras()
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    return {"cameras": cameras}
+    return {"cameras": _apply_camera_labels(cameras)}
+
+
+class CameraLabelRequest(BaseModel):
+    label: str = Field("", max_length=80)
+
+
+@app.post("/api/camera/{camera_id}/label")
+async def update_camera_label(camera_id: str, req: CameraLabelRequest, _token: str = Depends(require_auth)):
+    camera_id = str(camera_id)
+    label = req.label.strip()
+    labels = _load_camera_labels()
+    if label:
+        labels[camera_id] = label
+    else:
+        labels.pop(camera_id, None)
+    _save_camera_labels(labels)
+
+    camera = next((c for c in bridge.get_cameras() if str(c.get("id")) == camera_id), {"id": camera_id})
+    fallback = str(camera.get("device") or camera.get("id") or camera_id)
+    bridge.set_camera_label(camera_id, label or fallback)
+    camera = next((c for c in bridge.get_cameras() if str(c.get("id")) == camera_id), {"id": camera_id})
+    return {"camera": _apply_camera_labels([camera])[0], "labels": labels}
 
 
 @app.post("/api/camera/{camera_id}/start")
@@ -821,12 +884,12 @@ async def start_camera(camera_id: str, _token: str = Depends(require_auth)):
         camera = bridge.start_camera(camera_id, _get_camera_client_ip())
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    return {"camera": camera}
+    return {"camera": _apply_camera_labels([camera])[0]}
 
 
 @app.post("/api/camera/{camera_id}/stop")
 async def stop_camera(camera_id: str, _token: str = Depends(require_auth)):
-    return {"camera": bridge.stop_camera(camera_id)}
+    return {"camera": _apply_camera_labels([bridge.stop_camera(camera_id)])[0]}
 
 
 @app.post("/api/camera/{camera_id}/still")

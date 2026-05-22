@@ -952,6 +952,12 @@ async function startBrowserCamera(id, options = {}) {
     state.nativeCameraUrls[id] = urls;
     setNativeCameraSource(id, 0);
     setCameraStatus(id, 'connecting', 'Browser stream requested', 'This browser is connecting directly to the rover camera service. JPEG decode happens on this computer, not on the RPi.');
+    clearCameraStatusTimer(id);
+    state.cameraStatusTimers[id] = setTimeout(() => {
+      if (state.nativeCameras.has(id)) {
+        setCameraStatus(id, 'live', 'Browser decode', '');
+      }
+    }, 1500);
   } catch (err) {
     stopNativeCamera(id);
     setCameraStatus(id, 'error', 'Browser stream failed', err.message);

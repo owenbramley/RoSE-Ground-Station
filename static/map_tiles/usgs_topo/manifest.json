@@ -1,0 +1,32 @@
+{
+  "source": "https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}",
+  "min_zoom": 7,
+  "max_zoom": 15,
+  "areas": {
+    "hanksville_ut": {
+      "label": "Hanksville, Utah",
+      "bounds": {
+        "south": 38.18,
+        "west": -110.98,
+        "north": 38.58,
+        "east": -110.45
+      }
+    },
+    "downtown_oahu": {
+      "label": "Downtown Oahu / Honolulu",
+      "bounds": {
+        "south": 21.25,
+        "west": -157.93,
+        "north": 21.36,
+        "east": -157.78
+      }
+    }
+  },
+  "tile_count": 3375,
+  "counts": {
+    "cached": 0,
+    "downloaded": 3375,
+    "failed": 0
+  },
+  "generated_at": "2026-05-22T21:20:25Z"
+}

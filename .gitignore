@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+data/camera_labels.json
+data/camera_settings.json

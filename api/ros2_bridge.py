@@ -7,6 +7,7 @@ import threading
 import time
 import logging
 import base64
+import math
 import shutil
 import subprocess
 import urllib.error
@@ -77,6 +78,24 @@ def _read_jetson_temperatures(root: Path = THERMAL_ROOT) -> dict:
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
+
+def _unique_topics(*groups: list[str]) -> list[str]:
+    topics: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for topic in group:
+            clean = str(topic or "").strip()
+            if clean and clean not in seen:
+                topics.append(clean)
+                seen.add(clean)
+    return topics
+
+
+def _yaw_deg_from_quaternion(x: float, y: float, z: float, w: float) -> float:
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return (math.degrees(math.atan2(siny_cosp, cosy_cosp)) + 360.0) % 360.0
+
 # ---------------------------------------------------------------------------
 # Optional ROS2 imports
 # ---------------------------------------------------------------------------
@@ -84,7 +103,7 @@ try:
     import rclpy
     from rclpy.node import Node
     from rclpy.executors import MultiThreadedExecutor
-    from sensor_msgs.msg import Image, NavSatFix, BatteryState
+    from sensor_msgs.msg import Image, NavSatFix, BatteryState, Imu
     from std_msgs.msg import Bool, Float32, String, UInt8MultiArray
     from std_msgs.msg import UInt8
     try:
@@ -117,6 +136,7 @@ class _DataStore:
     def __init__(self):
         self._lock = threading.RLock()
         self.camera_frames: dict[str, Optional[bytes]] = {}
+        self.camera_frame_seq: dict[str, int] = {}
         self.cameras: dict[str, dict] = {}
         self.telemetry: dict = {
             "soc": None,
@@ -130,6 +150,12 @@ class _DataStore:
             "fix": "NO_DATA",
             "satellites": None,
             "valid": False,
+            "connected": False,
+            "source": None,
+            "last_update_s": None,
+            "updated_at": None,
+            "heading_deg": None,
+            "heading_source": None,
         }
         self.payload_connected: bool = False
         self.arm_connected: bool = False
@@ -221,15 +247,24 @@ class _DataStore:
         with self._lock:
             return self.camera_frames.get(str(camera_id))
 
+    def get_camera_frame_packet(self, camera_id: str) -> tuple[Optional[bytes], int]:
+        with self._lock:
+            camera_id = str(camera_id)
+            return self.camera_frames.get(camera_id), int(self.camera_frame_seq.get(camera_id, 0))
+
     def set_camera_frame(self, camera_id: str, data: bytes):
         with self._lock:
-            self.camera_frames[str(camera_id)] = data
-            if str(camera_id) in self.cameras:
-                self.cameras[str(camera_id)]["last_frame_s"] = time.time()
+            camera_id = str(camera_id)
+            self.camera_frames[camera_id] = data
+            self.camera_frame_seq[camera_id] = int(self.camera_frame_seq.get(camera_id, 0)) + 1
+            if camera_id in self.cameras:
+                self.cameras[camera_id]["last_frame_s"] = time.time()
 
     def clear_camera_frame(self, camera_id: str):
         with self._lock:
-            self.camera_frames[str(camera_id)] = None
+            camera_id = str(camera_id)
+            self.camera_frames[camera_id] = None
+            self.camera_frame_seq[camera_id] = int(self.camera_frame_seq.get(camera_id, 0)) + 1
 
     def set_cameras(self, cameras: list[dict]):
         with self._lock:
@@ -240,15 +275,19 @@ class _DataStore:
                 if not camera_id:
                     continue
                 prior = existing.get(camera_id, {})
+                stable_key = str(camera.get("stable_key") or prior.get("stable_key") or camera_id)
+                streaming = bool(camera.get("streaming")) if "streaming" in camera else bool(prior.get("streaming", False))
                 merged[camera_id] = {
                     **prior,
                     **camera,
                     "id": camera_id,
-                    "streaming": bool(prior.get("streaming", camera.get("streaming", False))),
-                    "port": prior.get("port", camera.get("port")),
+                    "stable_key": stable_key,
+                    "streaming": streaming,
+                    "port": camera.get("port", prior.get("port")),
                     "last_frame_s": prior.get("last_frame_s"),
                 }
                 self.camera_frames.setdefault(camera_id, None)
+                self.camera_frame_seq.setdefault(camera_id, 0)
             self.cameras = merged
 
     def update_camera(self, camera_id: str, **updates):
@@ -278,7 +317,15 @@ class _DataStore:
 
     def get_gnss(self) -> dict:
         with self._lock:
-            return dict(self.gnss)
+            g = dict(self.gnss)
+            last_update = g.get("last_update_s")
+            connected = isinstance(last_update, (int, float)) and (time.time() - float(last_update) <= 5.0)
+            g["connected"] = connected
+            if not connected:
+                g.update({"valid": False, "fix": "NO_DATA", "lat": None, "lon": None})
+            elif not g.get("valid"):
+                g["fix"] = "PENDING"
+            return g
 
     def get_system(self) -> dict:
         with self._lock:
@@ -319,7 +366,7 @@ class _DataStore:
                 self.motor_telemetry[group] = {}
             faults = list(getattr(msg, "fault_names", []) or [])
             sticky_faults = list(getattr(msg, "sticky_fault_names", []) or [])
-            status = "critical" if (msg.faults or msg.sticky_faults or not msg.connected) else "nominal"
+            status = "online" if msg.connected else "offline"
             self.motor_telemetry[group][int(msg.device_id)] = {
                 "device_id": int(msg.device_id),
                 "name": msg.name,
@@ -344,10 +391,8 @@ class _DataStore:
         if not motors or group not in self.subsystems:
             return
         connected = [m for m in motors if m.get("connected")]
-        faulted = [m for m in motors if m.get("faults") or m.get("sticky_faults")]
-        max_temp = max((m.get("motor_temperature_c", 0.0) for m in motors), default=0.0)
         total_current = sum(m.get("motor_current_a", 0.0) for m in connected)
-        status = "critical" if faulted else "degraded" if len(connected) < len(motors) else "nominal"
+        status = "online" if connected else "offline"
         self.subsystems[group].update({
             "connected": bool(connected),
             "status": status,
@@ -355,7 +400,7 @@ class _DataStore:
             "metrics": [
                 {"label": "Motors", "value": f"{len(connected)}/{len(motors)}"},
                 {"label": "Current", "value": f"{total_current:.1f} A"},
-                {"label": "Faults", "value": str(len(faulted))},
+                {"label": "Status", "value": "Online" if connected else "Offline"},
             ],
         })
 
@@ -394,7 +439,14 @@ class _DataStore:
                     {"topic": topic, "type": "sensor_msgs/Image", "purpose": f"{label} camera stream"}
                     for topic, label in zip(config.camera_topics, config.camera_labels)
                 ],
-                {"topic": config.gnss_topic, "type": "sensor_msgs/NavSatFix", "purpose": "GNSS rover fix"},
+                *[
+                    {"topic": topic, "type": "sensor_msgs/NavSatFix", "purpose": "GNSS rover fix"}
+                    for topic in _unique_topics(config.gnss_topics, [config.gnss_topic])
+                ],
+                *[
+                    {"topic": topic, "type": "sensor_msgs/Imu", "purpose": "Rover heading from IMU orientation"}
+                    for topic in _unique_topics(config.imu_topics, [config.imu_topic])
+                ],
                 {"topic": config.battery_topic, "type": "sensor_msgs/BatteryState", "purpose": "Battery telemetry"},
                 {"topic": config.jetson_temp_topic, "type": "std_msgs/Float32", "purpose": "Jetson temperature"},
                 {"topic": config.jetson_ip_topic, "type": "std_msgs/String", "purpose": "Jetson IP on the rover/ground-station network"},
@@ -678,6 +730,45 @@ def _clamp_int(value: float, low: int, high: int) -> int:
     return max(low, min(high, int(round(value))))
 
 
+def _camera_stable_key(camera: dict) -> str:
+    for key in ("stable_key", "serial", "serial_number", "device_path", "path", "device", "bus_info", "uid", "id"):
+        value = str(camera.get(key) or "").strip()
+        if value:
+            return value
+    return str(camera)
+
+
+def _zed_group_key(camera: dict) -> Optional[str]:
+    text = " ".join(
+        str(camera.get(key) or "")
+        for key in ("label", "name", "model", "device", "path", "id", "stable_key")
+    ).lower()
+    if "zed" not in text:
+        return None
+    serial = str(camera.get("serial") or camera.get("serial_number") or "").strip()
+    if serial:
+        return f"zed:{serial}"
+    return "zed:default"
+
+
+def _normalize_discovered_cameras(cameras: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    seen_zed: set[str] = set()
+    for camera in cameras:
+        item = dict(camera)
+        item["stable_key"] = _camera_stable_key(item)
+        zed_key = _zed_group_key(item)
+        if zed_key:
+            if zed_key in seen_zed:
+                store.add_log("INFO", f"Suppressing duplicate ZED stereo feed {item.get('id')}", "camera")
+                continue
+            seen_zed.add(zed_key)
+            item["stable_key"] = zed_key
+            item.setdefault("label", "ZED Camera")
+        normalized.append(item)
+    return normalized
+
+
 def _active_camera_ids(include_camera_id: Optional[str] = None) -> list[str]:
     ids = [
         str(camera.get("id"))
@@ -772,7 +863,12 @@ if ROS2_AVAILABLE:
                 for i, topic in enumerate(config.camera_topics):
                     self.create_subscription(Image, topic, self._make_cam_cb(f"ros{i}"), 5)
 
-            self.create_subscription(NavSatFix, config.gnss_topic, self._gnss_cb, 10)
+            for topic in _unique_topics(config.gnss_topics, [config.gnss_topic]):
+                self.create_subscription(NavSatFix, topic, self._make_gnss_cb(topic), 10)
+                store.add_log("INFO", f"Subscribed to GNSS topic {topic}", "ros2")
+            for topic in _unique_topics(config.imu_topics, [config.imu_topic]):
+                self.create_subscription(Imu, topic, self._make_imu_cb(topic), 10)
+                store.add_log("INFO", f"Subscribed to IMU heading topic {topic}", "ros2")
             self.create_subscription(BatteryState, config.battery_topic, self._battery_cb, 10)
             self.create_subscription(Float32, config.jetson_temp_topic, self._jetson_temp_cb, 5)
             self.create_subscription(String, config.jetson_ip_topic, self._jetson_ip_cb, 5)
@@ -822,16 +918,54 @@ if ROS2_AVAILABLE:
                     store.add_log("ERROR", f"Camera {cam_id} decode error: {e}", "ros2")
             return cb
 
-        def _gnss_cb(self, msg: NavSatFix):
-            fix_map = {0: "NO_FIX", 1: "2D", 2: "3D"}
-            with store._lock:
-                store.gnss = {
-                    "lat": round(msg.latitude, 7),
-                    "lon": round(msg.longitude, 7),
-                    "fix": fix_map.get(msg.status.status, "UNKNOWN"),
-                    "satellites": 0,
-                    "valid": msg.status.status >= 0,
-                }
+        def _make_gnss_cb(self, topic: str):
+            def cb(msg: NavSatFix):
+                lat = float(msg.latitude)
+                lon = float(msg.longitude)
+                valid_position = math.isfinite(lat) and math.isfinite(lon) and abs(lat) <= 90 and abs(lon) <= 180
+                valid_fix = int(msg.status.status) >= 0 and valid_position
+                if msg.status.status == 2:
+                    fix = "GBAS"
+                elif msg.status.status == 1:
+                    fix = "SBAS"
+                elif msg.status.status == 0:
+                    fix = "FIX"
+                else:
+                    fix = "PENDING"
+
+                with store._lock:
+                    prior_heading = store.gnss.get("heading_deg")
+                    prior_heading_source = store.gnss.get("heading_source")
+                    store.gnss.update({
+                        "lat": round(lat, 7) if valid_position else None,
+                        "lon": round(lon, 7) if valid_position else None,
+                        "altitude_m": round(float(msg.altitude), 2) if math.isfinite(float(msg.altitude)) else None,
+                        "fix": fix,
+                        "fix_status": int(msg.status.status),
+                        "satellites": store.gnss.get("satellites"),
+                        "valid": valid_fix,
+                        "connected": True,
+                        "source": topic,
+                        "last_update_s": time.time(),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "heading_deg": prior_heading,
+                        "heading_source": prior_heading_source,
+                    })
+                    store.system["gnss_module_online"] = True
+            return cb
+
+        def _make_imu_cb(self, topic: str):
+            def cb(msg: Imu):
+                q = msg.orientation
+                quat = [float(q.x), float(q.y), float(q.z), float(q.w)]
+                if not all(math.isfinite(v) for v in quat) or all(abs(v) < 1e-9 for v in quat):
+                    return
+                heading = round(_yaw_deg_from_quaternion(*quat), 1)
+                with store._lock:
+                    store.gnss["heading_deg"] = heading
+                    store.gnss["heading_source"] = topic
+                    store.system["imu_online"] = True
+            return cb
 
         def _battery_cb(self, msg: BatteryState):
             with store._lock:
@@ -1000,6 +1134,9 @@ class ROS2Bridge:
     def get_camera_frame(self, camera_id: str) -> Optional[bytes]:
         return store.get_camera_frame(str(camera_id))
 
+    def get_camera_frame_packet(self, camera_id: str) -> tuple[Optional[bytes], int]:
+        return store.get_camera_frame_packet(str(camera_id))
+
     def get_cameras(self) -> list[dict]:
         return store.get_cameras()
 
@@ -1012,7 +1149,7 @@ class ROS2Bridge:
             raise RuntimeError("Browser decode is only available when GS_CAMERA_SOURCE=udp")
 
         res = _rover_request("GET", "/cameras", timeout=5.0)
-        cameras = res.get("cameras", [])
+        cameras = _normalize_discovered_cameras(res.get("cameras", []))
         store.set_cameras(cameras)
         camera = next((c for c in store.get_cameras() if str(c.get("id")) == camera_id), None)
         if not camera:
@@ -1020,7 +1157,7 @@ class ROS2Bridge:
 
         with _receiver_lock:
             receiver_active = camera_id in _receiver_stop_events
-        if camera.get("streaming") or receiver_active:
+        if receiver_active:
             try:
                 _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id, safe='')}/stop", {}, timeout=3.0)
             except RuntimeError as e:
@@ -1031,9 +1168,14 @@ class ROS2Bridge:
         store.clear_camera_frame(camera_id)
 
         base_url = _active_rover_camera_service_url()
-        url = f"{base_url}/cameras/{urllib.parse.quote(camera_id, safe='')}/native.mjpg"
+        stream_query = urllib.parse.urlencode({
+            "low_latency": "1",
+            "max_bitrate": int(config.rover_camera_bitrate),
+            "max_fps": int(config.rover_camera_max_fps),
+        })
+        url = f"{base_url}/cameras/{urllib.parse.quote(camera_id, safe='')}/native.mjpg?{stream_query}"
         urls = [
-            f"{candidate}/cameras/{urllib.parse.quote(camera_id, safe='')}/native.mjpg"
+            f"{candidate}/cameras/{urllib.parse.quote(camera_id, safe='')}/native.mjpg?{stream_query}"
             for candidate in _rover_camera_service_candidates()
         ]
         store.add_log("INFO", f"Prepared camera {camera_id} for direct browser MJPEG decode", "camera")
@@ -1058,7 +1200,7 @@ class ROS2Bridge:
             store.set_cameras(cameras)
             return store.get_cameras()
         res = _rover_request("GET", "/cameras", timeout=5.0)
-        cameras = res.get("cameras", [])
+        cameras = _normalize_discovered_cameras(res.get("cameras", []))
         store.set_cameras(cameras)
         store.add_log("INFO", f"Discovered {len(cameras)} rover camera(s)", "camera")
         return store.get_cameras()
@@ -1125,7 +1267,7 @@ class ROS2Bridge:
 
     def capture_camera_still(self, camera_id: str) -> dict:
         camera_id = str(camera_id)
-        paused_ids = [str(c.get("id")) for c in store.get_cameras() if c.get("streaming")]
+        paused_ids = [str(c.get("id")) for c in store.get_cameras() if c.get("streaming") and str(c.get("id")) != camera_id]
         for paused_id in paused_ids:
             self.stop_camera(paused_id)
 
@@ -1134,8 +1276,21 @@ class ROS2Bridge:
                 "max_width": config.rover_camera_still_max_width,
                 "max_height": config.rover_camera_still_max_height,
             }
-            res = _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id)}/still", payload, timeout=15.0)
-            image = res.get("image", {})
+            try:
+                res = _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id)}/still", payload, timeout=15.0)
+                image = res.get("image", {})
+            except RuntimeError as e:
+                data = store.get_camera_frame(camera_id)
+                if not data:
+                    raise
+                store.add_log("WARN", f"Rover still endpoint failed for {camera_id}; using latest stream frame: {e}", "camera")
+                image = {
+                    "camera_id": camera_id,
+                    "image_data_url": "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii"),
+                    "content_type": "image/jpeg",
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "fallback": "latest_stream_frame",
+                }
         else:
             data = store.get_camera_frame(camera_id)
             if not data:

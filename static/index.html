@@ -40,25 +40,10 @@
       <span>900M</span>
       <strong id="link900Val">--%</strong>
     </div>
-    <div class="link-status" title="Arm controller ROS topic health">
-      <span class="status-dot dot-yellow" id="armControllerDot"></span>
-      <span>ARM</span>
-      <strong id="armControllerVal">--</strong>
-    </div>
-    <div class="link-status" title="Drive controller ROS topic health">
-      <span class="status-dot dot-yellow" id="driveControllerDot"></span>
-      <span>DRIVE</span>
-      <strong id="driveControllerVal">--</strong>
-    </div>
-    <!-- Ground station access URL — click to copy -->
-    <div class="gs-url-chip" id="gsUrlChip" title="Click to copy URL">
-      <span class="gs-url-icon">⊕</span>
-      <span id="gsUrlText">Loading…</span>
-      <span class="gs-url-copied hidden" id="gsUrlCopied">Copied!</span>
-    </div>
-    <div class="controller-status" id="controllerStatus">
+    <div class="controller-status" id="controllerStatus" title="Arm and drive controller status">
       <span class="status-dot dot-red" id="controllerDot"></span>
-      <span id="controllerLabel">No Controller</span>
+      <span>CTRL</span>
+      <strong id="controllerCount">0/2</strong>
     </div>
     <div class="api-status" id="apiStatus">
       <span class="status-dot dot-yellow" id="apiDot"></span>
@@ -68,7 +53,7 @@
 </header>
 
 <!-- ══════════════════════════════════════════════════════════════════════
-     PASSWORD OVERLAY — shown until authenticated
+     CONNECTION OVERLAY — shown until this browser gets a UI slot
 ════════════════════════════════════════════════════════════════════════ -->
 <div id="authOverlay">
   <div class="auth-box">
@@ -76,16 +61,16 @@
       <img class="auth-logo-img" src="logo.png" alt="RoSE logo" />
       <span class="auth-logo-text">RoSE Ground Station</span>
     </div>
-    <div class="auth-title">Secure Access</div>
+    <div class="auth-title">Ground Station Access</div>
     <div class="auth-connect-url" id="authConnectUrl"></div>
     <form id="authForm" autocomplete="off">
-      <div class="auth-field">
+      <div class="auth-field hidden">
         <label class="auth-label" for="authPassword">Password</label>
         <input
           type="password"
           id="authPassword"
           class="auth-input"
-          placeholder="Enter access password"
+          placeholder=""
           autofocus
           autocomplete="current-password"
         />
@@ -96,7 +81,7 @@
       </button>
     </form>
     <div class="auth-footer">
-      Set <code>GS_PASSWORD</code> env var to configure the password
+      Passwordless mode · maximum 3 UI clients
     </div>
   </div>
 </div>
@@ -235,23 +220,6 @@
           </div>
         </section>
 
-        <section class="section dashboard-timer-section">
-          <div class="section-header">
-            <span>Dashboard Timer</span>
-            <span class="timer-sync-state" id="timerSyncState">SYNCING</span>
-          </div>
-          <div class="dashboard-timer-body">
-            <div class="dashboard-timer-display mono" id="dashboardTimerDisplay">00:00.00</div>
-            <div class="dashboard-timer-controls">
-              <button class="btn-secondary btn-sm" id="timerPauseBtn">Start</button>
-              <button class="btn-secondary btn-sm" id="timerLapBtn">Lap</button>
-              <button class="btn-secondary btn-sm" id="timerStopBtn">Stop</button>
-              <button class="btn-secondary btn-sm" id="timerResetBtn">Reset</button>
-            </div>
-            <div class="timer-laps" id="timerLaps"></div>
-          </div>
-        </section>
-
         <section class="section controller-topic-section">
           <div class="section-header"><span>Controller Topics</span></div>
           <div class="controller-topic-grid">
@@ -284,7 +252,9 @@
           <span>GPS / GNSS</span>
           <span class="gps-fix-badge" id="gpsBadge">NO FIX</span>
         </div>
-        <div id="gpsMap"></div>
+        <div id="gpsMap">
+          <div class="gps-map-overlay" id="gpsMapOverlay">GPS Not Connected</div>
+        </div>
         <div class="gps-coords" id="gpsCoords">
           <span>Lat: <span id="gpsLat">—</span></span>
           <span>Lon: <span id="gpsLon">—</span></span>
@@ -304,10 +274,12 @@
       <div class="section-header camera-page-header">
         <span>Camera Feeds</span>
         <div class="camera-actions">
-          <div class="camera-decode-toggle" aria-label="Camera decode mode">
-            <button class="camera-decode-btn" id="cameraDecodePiBtn" data-decode-mode="pi" type="button">Pi Decode</button>
-            <button class="camera-decode-btn" id="cameraDecodeBrowserBtn" data-decode-mode="browser" type="button">Browser Decode</button>
-          </div>
+          <label class="camera-bitrate-control" title="Per-stream max bitrate scale sent to the rover camera service">
+            <span>Max Bitrate</span>
+            <input type="number" id="cameraMaxBitrate" min="50" max="10000" step="50" inputmode="numeric" />
+            <span class="camera-bitrate-unit">kbps</span>
+            <button class="btn-secondary btn-sm" id="saveCameraBitrateBtn" type="button">Save</button>
+          </label>
           <button class="btn-secondary btn-sm" id="refreshCamerasBtn">Refresh Cameras</button>
           <button class="btn-secondary btn-sm" id="showAllCamerasBtn">Show All</button>
           <button class="btn-secondary btn-sm" id="capture360Btn">Capture 360 Image</button>
@@ -760,6 +732,6 @@
 </main><!-- /main -->
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="app.js?v=browser-decode-20260522"></script>
+<script src="app.js?v=offline-map-20260522"></script>
 </body>
 </html>

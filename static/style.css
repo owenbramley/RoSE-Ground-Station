@@ -449,6 +449,8 @@ html, body {
 .subsystem-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .subsystem-title strong { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .subsystem-state { font-size: 10px; font-weight: 800; letter-spacing: 0.06em; color: var(--green); }
+.subsystem-card.online .subsystem-state { color: var(--green); }
+.subsystem-card.offline .subsystem-state { color: var(--red); }
 .subsystem-card.degraded .subsystem-state { color: var(--yellow); }
 .subsystem-card.critical .subsystem-state { color: var(--red); }
 .subsystem-summary { display: none; }
@@ -543,6 +545,8 @@ html, body {
   font-size: 13px;
   font-weight: 800;
 }
+.controller-topic-value.online { color: var(--green); }
+.controller-topic-value.offline { color: var(--red); }
 
 /* ── Telemetry ────────────────────────────────────────────── */
 .telemetry-section { overflow-y: auto; flex: 1; min-height: 0; }

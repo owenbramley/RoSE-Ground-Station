@@ -1644,7 +1644,11 @@ function updateControllerTopicHealth(armConn, driveConn) {
     const dashVal = document.getElementById(`dash${name.charAt(0).toUpperCase() + name.slice(1)}ControllerVal`);
     const dashCard = document.getElementById(`${name}ControllerCard`);
     if (dashDot) dashDot.className = `status-dot ${dotCls}`;
-    if (dashVal) dashVal.textContent = `${label} on ROS network`;
+    if (dashVal) {
+      dashVal.textContent = `${label} on ROS network`;
+      dashVal.classList.toggle('online', connected);
+      dashVal.classList.toggle('offline', !connected);
+    }
     if (dashCard) dashCard.classList.toggle('offline', !connected);
   };
   setHealth('arm', !!armConn);

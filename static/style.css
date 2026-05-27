@@ -140,7 +140,8 @@ html, body {
   font-size: 12px; color: var(--text-dim);
   white-space: nowrap;
 }
-.link-status strong { color: var(--text); font-family: var(--mono); font-size: 11px; }
+.link-status strong,
+.controller-status strong { color: var(--text); font-family: var(--mono); font-size: 11px; }
 
 /* E-STOP */
 .estop-btn {
@@ -225,41 +226,43 @@ html, body {
   gap: 8px;
   flex-wrap: wrap;
 }
-.camera-decode-toggle {
+.camera-bitrate-control {
   display: inline-flex;
   align-items: center;
-  padding: 2px;
-  background: rgba(0,0,0,0.28);
+  gap: 6px;
+  min-height: 30px;
+  padding: 2px 4px 2px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-}
-.camera-decode-btn {
-  min-width: 96px;
-  background: transparent;
+  background: rgba(0,0,0,0.22);
   color: var(--text-dim);
-  border: 0;
-  border-radius: calc(var(--radius) - 2px);
-  padding: 4px 9px;
   font-size: 11px;
   font-weight: 700;
-  cursor: pointer;
 }
-.camera-decode-btn.active {
-  background: var(--accent);
-  color: #000;
-}
-.camera-decode-btn:not(.active):hover {
+.camera-bitrate-control input {
+  width: 86px;
+  background: var(--bg);
   color: var(--text);
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: var(--radius);
+  padding: 3px 6px;
+  font-family: var(--mono);
+  font-size: 11px;
 }
-
+.camera-bitrate-unit {
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
 .camera-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr));
   grid-auto-rows: auto;
+  grid-auto-flow: row;
   align-content: start;
-  gap: 12px;
+  align-items: start;
+  gap: 18px 16px;
   background: #000;
-  padding: 12px;
+  padding: 16px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -268,8 +271,8 @@ html, body {
 .camera-cell {
   position: relative;
   aspect-ratio: 4 / 3;
+  width: 100%;
   min-height: 280px;
-  max-height: min(68vh, 720px);
   background: #050d18;
   overflow: hidden;
   border: 1px solid rgba(255,255,255,0.12);
@@ -312,13 +315,25 @@ html, body {
   letter-spacing: 0.12em;
 }
 .camera-label-input {
-  width: min(260px, calc(100% - 250px));
+  width: min(260px, calc(100% - 330px));
   min-width: 110px;
   background: rgba(0,0,0,0.55);
   border: 1px solid rgba(255,255,255,0.18);
   border-radius: var(--radius);
   padding: 4px 7px;
   outline: none;
+}
+@media (max-width: 720px) {
+  .camera-tools {
+    top: 34px;
+    left: 8px;
+    right: auto;
+    flex-wrap: wrap;
+  }
+  .camera-label-input {
+    width: calc(100% - 16px);
+    max-width: none;
+  }
 }
 .camera-label-input:focus {
   color: var(--text);
@@ -334,7 +349,6 @@ html, body {
   gap: 6px;
 }
 .camera-hide-btn,
-.camera-native-btn,
 .camera-rotate-btn,
 .camera-still-btn {
   background: rgba(0,0,0,0.65);
@@ -347,7 +361,6 @@ html, body {
   cursor: pointer;
 }
 .camera-hide-btn:hover,
-.camera-native-btn:hover,
 .camera-rotate-btn:hover,
 .camera-still-btn:hover {
   color: var(--accent);
@@ -436,6 +449,8 @@ html, body {
 .subsystem-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .subsystem-title strong { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .subsystem-state { font-size: 10px; font-weight: 800; letter-spacing: 0.06em; color: var(--green); }
+.subsystem-card.online .subsystem-state { color: var(--green); }
+.subsystem-card.offline .subsystem-state { color: var(--red); }
 .subsystem-card.degraded .subsystem-state { color: var(--yellow); }
 .subsystem-card.critical .subsystem-state { color: var(--red); }
 .subsystem-summary { display: none; }
@@ -499,50 +514,6 @@ html, body {
   text-transform: uppercase;
 }
 
-/* Dashboard timer */
-.timer-sync-state {
-  color: var(--text-muted);
-  font-family: var(--mono);
-  font-size: 10px;
-}
-.timer-sync-state.running { color: var(--green); }
-.timer-sync-state.paused { color: var(--yellow); }
-.dashboard-timer-body {
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.dashboard-timer-display {
-  font-size: 42px;
-  font-weight: 800;
-  line-height: 1;
-  letter-spacing: 0;
-}
-.dashboard-timer-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.timer-laps {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  min-height: 0;
-}
-.timer-lap {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 5px 8px;
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 11px;
-}
-
 /* Controller topic health */
 .controller-topic-grid {
   display: grid;
@@ -574,6 +545,8 @@ html, body {
   font-size: 13px;
   font-weight: 800;
 }
+.controller-topic-value.online { color: var(--green); }
+.controller-topic-value.offline { color: var(--red); }
 
 /* ── Telemetry ────────────────────────────────────────────── */
 .telemetry-section { overflow-y: auto; flex: 1; min-height: 0; }
@@ -638,7 +611,44 @@ html, body {
 /* ── GPS section ──────────────────────────────────────────── */
 .gps-section { display: flex; flex-direction: column; }
 
-#gpsMap { flex: 1; min-height: 360px; background: #0a1525; }
+#gpsMap {
+  position: relative;
+  flex: 1;
+  min-height: 360px;
+  background: #0a1525;
+}
+
+.gps-map-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 5, 5, 0.58);
+  color: var(--text);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+.rover-heading-icon {
+  width: 30px;
+  height: 30px;
+}
+
+.rover-heading-arrow {
+  width: 0;
+  height: 0;
+  margin: 1px auto 0;
+  border-left: 10px solid transparent;
+  border-right: 10px solid transparent;
+  border-bottom: 26px solid var(--accent);
+  filter: drop-shadow(0 0 5px rgba(255,55,168,0.9));
+  transform-origin: 50% 58%;
+}
 
 .gps-fix-badge {
   font-size: 10px; font-weight: 700; padding: 2px 8px;
@@ -648,6 +658,8 @@ html, body {
 }
 .gps-fix-badge.fix3d { background: rgba(34,197,94,0.15); color: var(--green); border-color: rgba(34,197,94,0.3); }
 .gps-fix-badge.fix2d { background: rgba(245,158,11,0.15); color: var(--yellow); border-color: rgba(245,158,11,0.3); }
+.gps-fix-badge.pending { background: rgba(245,158,11,0.15); color: var(--yellow); border-color: rgba(245,158,11,0.3); }
+.gps-fix-badge.offline { background: rgba(239,68,68,0.15); color: var(--red); border-color: rgba(239,68,68,0.3); }
 
 .gps-coords {
   display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
@@ -1637,37 +1649,6 @@ html, body {
 .auth-footer code { font-family: var(--mono); font-size: 10px; color: var(--accent-dim); }
 
 /* ══════════════════════════════════════════════════════════
-   GS URL CHIP (header)
-══════════════════════════════════════════════════════════ */
-
-.gs-url-chip {
-  display: flex; align-items: center; gap: 7px;
-  min-height: 34px;
-  padding: 4px 10px; border-radius: var(--radius);
-  border: 1px solid rgba(255,55,168,0.25);
-  background: rgba(255,55,168,0.08);
-  font-family: var(--mono); font-size: 11px; color: var(--accent);
-  cursor: pointer; transition: all 0.15s;
-  position: relative; white-space: nowrap;
-  max-width: min(260px, 28vw);
-  min-width: 0;
-  overflow: hidden;
-}
-.gs-url-chip:hover {
-  background: rgba(255,55,168,0.16);
-  border-color: rgba(255,55,168,0.5);
-}
-.gs-url-icon { flex-shrink: 0; font-size: 12px; }
-#gsUrlText { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.gs-url-copied {
-  position: absolute; inset: 0;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(0,212,170,0.18);
-  color: var(--accent); font-weight: 700;
-  border-radius: var(--radius); font-size: 11px;
-}
-
-/* ══════════════════════════════════════════════════════════
    LEAFLET OVERRIDES
 ══════════════════════════════════════════════════════════ */
 .leaflet-container { background: #0a1525 !important; }
@@ -1696,7 +1677,6 @@ html, body {
     width: 100%;
   }
   .header-right > * { justify-content: center; min-width: 0; }
-  .gs-url-chip { max-width: none; }
   #main { top: 118px; }
   #toastContainer { right: 12px; bottom: 12px; }
   .subsystem-overview-grid, .system-grid { grid-template-columns: repeat(2, 1fr); }
@@ -1757,8 +1737,7 @@ html, body {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .header-right > * { justify-content: center; }
-  .gs-url-chip { grid-column: 1 / -1; }
-  .camera-grid, .subsystem-overview-grid, .telemetry-grid, .system-grid, .mission-mode-grid, .timer-laps,
+  .camera-grid, .subsystem-overview-grid, .telemetry-grid, .system-grid, .mission-mode-grid,
   .network-config-grid, .network-radio-grid, .network-metric-hero, .network-notes-grid,
   .controller-topic-grid,
   .payload-status-grid, .payload-sensor-grid, .byte-columns { grid-template-columns: 1fr; }

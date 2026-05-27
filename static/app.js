@@ -7,7 +7,11 @@
 // ── Constants ────────────────────────────────────────────────
 const WS_ORIGIN   = `ws://${location.host}`;
 const TOKEN_KEY   = 'rose_token';
+const CLIENT_ID_KEY = 'rose_client_id';
 const CAMERA_DECODE_MODE_KEY = 'rose_camera_decode_mode';
+let _appBooted = false;
+let _authInitialized = false;
+const CAMERA_START_JITTER_MS = Math.floor(Math.random() * 2000);
 
 // ── Global state ─────────────────────────────────────────────
 const state = {
@@ -18,10 +22,12 @@ const state = {
   cameraRotations: {},
   cameraStatuses: {},
   cameraStatusTimers: {},
+  cameraConnectTimers: {},
+  cameraStartSeq: {},
   nativeCameras: new Set(),
   nativeCameraUrls: {},
   nativeCameraUrlIndex: {},
-  cameraDecodeMode: 'pi',
+  cameraDecodeMode: 'browser',
   cameraVisibilitySaved: false,
   cameras: [],
   stillPausedCameras: [],
@@ -38,16 +44,13 @@ const state = {
   alertLogKeys: new Map(),
   gsUrl: '',
   missionMode: 'default',
-  dashboardTimer: {
-    elapsedMs: 0,
-    running: false,
-    laps: [],
-    serverTs: 0,
-    receivedAt: 0,
-  },
   network: {
     pollTimer: null,
     saving: false,
+  },
+  cameraSettings: {
+    saving: false,
+    maxBitrateKbps: null,
   },
 };
 
@@ -56,14 +59,26 @@ const state = {
 // ══════════════════════════════════════════════════════════════
 
 function getToken() {
-  return sessionStorage.getItem(TOKEN_KEY) || '';
+  try {
+    const token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || '';
+    if (token && !localStorage.getItem(TOKEN_KEY)) localStorage.setItem(TOKEN_KEY, token);
+    return token;
+  } catch (_) {
+    return sessionStorage.getItem(TOKEN_KEY) || '';
+  }
 }
 
 function setToken(t) {
+  try {
+    localStorage.setItem(TOKEN_KEY, t);
+  } catch (_) {}
   sessionStorage.setItem(TOKEN_KEY, t);
 }
 
 function clearToken() {
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch (_) {}
   sessionStorage.removeItem(TOKEN_KEY);
 }
 
@@ -71,7 +86,21 @@ function clearToken() {
 function withToken(url) {
   const t = getToken();
   const sep = url.includes('?') ? '&' : '?';
-  return t ? `${url}${sep}token=${encodeURIComponent(t)}` : url;
+  const parts = [];
+  if (t) parts.push(`token=${encodeURIComponent(t)}`);
+  parts.push(`client_id=${encodeURIComponent(getClientId())}`);
+  return `${url}${sep}${parts.join('&')}`;
+}
+
+function getClientId() {
+  let id = localStorage.getItem(CLIENT_ID_KEY) || '';
+  if (!id) {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    id = [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem(CLIENT_ID_KEY, id);
+  }
+  return id;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -158,13 +187,6 @@ async function apiFetch(path, options = {}) {
     const res = await fetch(path, { signal: ctrl.signal, ...options, headers });
     clearTimeout(timeout);
 
-    // Token rejected mid-session → force re-login
-    if (res.status === 401 || res.status === 403) {
-      clearToken();
-      showAuthOverlay();
-      throw new Error('Session expired — please log in again');
-    }
-
     if (!res.ok) {
       let detail = `HTTP ${res.status}`;
       try {
@@ -214,15 +236,18 @@ function setBarWidth(id, value, maxVal = 100) {
 // AUTHENTICATION
 // ══════════════════════════════════════════════════════════════
 
-function showAuthOverlay() {
+function showAuthOverlay(options = {}) {
+  const { clearPassword = false, focus = true } = options;
   document.getElementById('authOverlay').classList.remove('hidden');
-  document.getElementById('authPassword').value = '';
-  document.getElementById('authPassword').focus();
+  const input = document.getElementById('authPassword');
+  if (clearPassword) input.value = '';
+  if (focus && document.activeElement !== input && !input.closest('.hidden')) input.focus();
   hideAuthError();
 }
 
 function hideAuthOverlay() {
   document.getElementById('authOverlay').classList.add('hidden');
+  document.getElementById('authPassword').value = '';
 }
 
 function showAuthError(msg) {
@@ -230,8 +255,10 @@ function showAuthError(msg) {
   el.textContent = msg;
   el.classList.remove('hidden');
   const input = document.getElementById('authPassword');
-  input.classList.add('shake');
-  setTimeout(() => input.classList.remove('shake'), 400);
+  if (input) {
+    input.classList.add('shake');
+    setTimeout(() => input.classList.remove('shake'), 400);
+  }
 }
 
 function hideAuthError() {
@@ -239,6 +266,9 @@ function hideAuthError() {
 }
 
 async function initAuth() {
+  if (_authInitialized) return;
+  _authInitialized = true;
+
   // Fetch server info to show the URL on the login screen (public endpoint)
   try {
     const info = await fetch('/api/info').then(r => r.json());
@@ -253,47 +283,30 @@ async function initAuth() {
     populateGsUrlChip([`http://${location.host}`]);
   }
 
-  // Check existing token
-  const existing = getToken();
-  if (existing) {
-    try {
-      await apiFetch('/api/health');
-      // Token still valid — skip login screen
-      hideAuthOverlay();
-      bootApp();
-      return;
-    } catch (_) {
-      clearToken();
-    }
-  }
-
-  // Show login form
-  showAuthOverlay();
+  showAuthOverlay({ clearPassword: false, focus: false });
+  document.getElementById('authSubmitLabel').textContent = 'Connect';
 
   document.getElementById('authForm').addEventListener('submit', async e => {
     e.preventDefault();
-    const password = document.getElementById('authPassword').value;
     const btn      = document.getElementById('authSubmit');
     const lbl      = document.getElementById('authSubmitLabel');
-    if (!password) return;
 
     btn.disabled = true;
-    lbl.textContent = 'Connecting…';
+    lbl.textContent = 'Connecting...';
     hideAuthError();
 
     try {
+      await connectUiSession();
       const res = await fetch('/api/auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ password: '' }),
       });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j.detail || 'Incorrect password');
-      }
+      if (!res.ok) throw new Error('Could not start passwordless session');
       const { token } = await res.json();
       setToken(token);
       hideAuthOverlay();
+      startUiHeartbeat();
       bootApp();
     } catch (err) {
       showAuthError(err.message);
@@ -302,6 +315,59 @@ async function initAuth() {
       lbl.textContent = 'Connect';
     }
   });
+
+  try {
+    await connectUiSession();
+    const res = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: '' }),
+    });
+    const { token } = await res.json();
+    setToken(token || '');
+    hideAuthOverlay();
+    startUiHeartbeat();
+    bootApp();
+  } catch (err) {
+    showAuthError(err.message);
+  }
+}
+
+async function connectUiSession() {
+  const res = await fetch('/api/session/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: getClientId() }),
+  });
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}));
+    throw new Error(j.detail || 'Ground station UI is full. Try again after another device disconnects.');
+  }
+  return res.json();
+}
+
+function startUiHeartbeat() {
+  if (state.uiHeartbeatTimer) clearInterval(state.uiHeartbeatTimer);
+  const beat = () => {
+    fetch('/api/session/heartbeat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: getClientId() }),
+      keepalive: true,
+    }).then(res => {
+      if (res.status === 409 || res.status === 429) {
+        showAuthOverlay({ focus: false });
+        showAuthError('This browser no longer has a UI slot. Connect again when fewer than 3 devices are active.');
+      }
+    }).catch(() => {});
+  };
+  state.uiHeartbeatTimer = setInterval(beat, 5000);
+  window.addEventListener('pagehide', () => {
+    navigator.sendBeacon?.(
+      '/api/session/disconnect',
+      new Blob([JSON.stringify({ client_id: getClientId() })], { type: 'application/json' })
+    );
+  }, { once: true });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -311,7 +377,9 @@ async function initAuth() {
 function populateGsUrlChip(urls) {
   const primaryUrl = urls[0] || `http://${location.host}`;
   const chip = document.getElementById('gsUrlChip');
-  document.getElementById('gsUrlText').textContent = primaryUrl;
+  if (!chip) return;
+  const text = document.getElementById('gsUrlText');
+  if (text) text.textContent = primaryUrl;
 
   // Tooltip with all IPs
   if (urls.length > 1) chip.title = `All addresses:\n${urls.join('\n')}\nClick to copy`;
@@ -363,8 +431,6 @@ function connectTelemetryWS() {
 
   _telemWS.addEventListener('close', e => {
     setApiStatus(false);
-    // Code 4001 means auth rejected — force re-login
-    if (e.code === 4001) { clearToken(); showAuthOverlay(); return; }
     setTimeout(connectTelemetryWS, Math.min(_telemRetry, 30000));
     _telemRetry = Math.min(_telemRetry * 1.5, 30000);
   });
@@ -390,7 +456,6 @@ function handleTelemetryMsg(msg) {
   updateLifeAnalysis(msg.life_analysis || {});
   updateLedController(msg.led_controller || {});
   updateMotorTelemetry(msg.motor_telemetry || {});
-  updateDashboardTimer(msg.dashboard_timer || {});
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -457,27 +522,61 @@ let _trailPoints = [];
 const MAX_TRAIL = 120;
 
 function initMap() {
-  _map = L.map('gpsMap', { center: [43.6532, -79.3832], zoom: 17, attributionControl: false });
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 20 }).addTo(_map);
+  _map = L.map('gpsMap', { center: [38.5733, -109.5498], zoom: 15, attributionControl: false });
+  L.tileLayer('/map_tiles/usgs_topo/{z}/{x}/{y}.jpg', {
+    minZoom: 7,
+    maxZoom: 16,
+    maxNativeZoom: 15,
+    attribution: 'Offline USGS Topo',
+  }).addTo(_map);
 
   const icon = L.divIcon({
-    className: '',
-    html: `<div style="width:14px;height:14px;border-radius:50%;background:#ff37a8;border:2px solid #fff;box-shadow:0 0 8px #ff37a8aa"></div>`,
-    iconSize: [14, 14], iconAnchor: [7, 7],
+    className: 'rover-heading-icon',
+    html: `<div class="rover-heading-arrow" id="roverHeadingArrow"></div>`,
+    iconSize: [30, 30], iconAnchor: [15, 15],
   });
 
-  _roverMarker = L.marker([43.6532, -79.3832], { icon }).addTo(_map);
+  _roverMarker = L.marker([38.5733, -109.5498], { icon }).addTo(_map);
   _gpsTrail = L.polyline([], { color: '#ff37a8', weight: 2, opacity: 0.5 }).addTo(_map);
 }
 
 function updateGPS(g) {
   g = g || {};
-  if (!g.valid || !_map) return;
+  if (!_map) return;
+  const connected = g.connected === true;
+  const valid = g.valid === true;
+  const overlay = document.getElementById('gpsMapOverlay');
+  if (overlay) {
+    overlay.classList.toggle('hidden', valid);
+    overlay.textContent = connected ? 'GPS Fix Pending' : 'GPS Not Connected';
+  }
+
+  document.getElementById('gpsFix').textContent = connected ? (valid ? (g.fix || 'FIX') : 'PENDING') : 'NOT CONNECTED';
+  document.getElementById('gpsSats').textContent = g.satellites ?? '--';
+  document.getElementById('gpsUpdated').textContent = connected && g.updated_at
+    ? `Updated ${new Date(g.updated_at).toLocaleTimeString()}`
+    : '';
+
+  const badge = document.getElementById('gpsBadge');
+  if (badge) {
+    badge.textContent = !connected ? 'GPS NOT CONNECTED' : valid ? `${g.fix || 'GPS'} FIX` : 'GPS FIX PENDING';
+    badge.className = `gps-fix-badge ${!connected ? 'offline' : valid ? 'fix3d' : 'pending'}`;
+  }
+
+  if (!valid) {
+    document.getElementById('gpsLat').textContent = '--';
+    document.getElementById('gpsLon').textContent = '--';
+    return;
+  }
+
   const lat = asFiniteNumber(g.lat);
   const lon = asFiniteNumber(g.lon);
   if (lat === null || lon === null) return;
   const ll = [lat, lon];
   _roverMarker.setLatLng(ll);
+  const heading = asFiniteNumber(g.heading_deg);
+  const arrow = document.getElementById('roverHeadingArrow');
+  if (arrow) arrow.style.transform = `rotate(${heading === null ? 0 : heading}deg)`;
   _trailPoints.push(ll);
   if (_trailPoints.length > MAX_TRAIL) _trailPoints.shift();
   _gpsTrail.setLatLngs(_trailPoints);
@@ -485,13 +584,6 @@ function updateGPS(g) {
 
   document.getElementById('gpsLat').textContent     = lat.toFixed(6);
   document.getElementById('gpsLon').textContent     = lon.toFixed(6);
-  document.getElementById('gpsFix').textContent     = g.fix;
-  document.getElementById('gpsSats').textContent    = g.satellites ?? '--';
-  document.getElementById('gpsUpdated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
-
-  const badge = document.getElementById('gpsBadge');
-  badge.textContent = g.fix === '3D' ? '3D FIX' : g.fix === '2D' ? '2D FIX' : 'NO FIX';
-  badge.className   = `gps-fix-badge${g.fix === '3D' ? ' fix3d' : g.fix === '2D' ? ' fix2d' : ''}`;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -499,21 +591,6 @@ function updateGPS(g) {
 // ══════════════════════════════════════════════════════════════
 
 function initGamepadPolling() {
-  setInterval(() => {
-    const gamepads  = navigator.getGamepads ? navigator.getGamepads() : [];
-    const connected = Array.from(gamepads).some(g => g !== null && g.connected);
-    const dot   = document.getElementById('controllerDot');
-    const label = document.getElementById('controllerLabel');
-    if (connected) {
-      const gp = Array.from(gamepads).find(g => g && g.connected);
-      dot.className     = 'status-dot dot-green';
-      label.textContent = (gp.id || 'Controller').substring(0, 22);
-    } else {
-      dot.className     = 'status-dot dot-red';
-      label.textContent = 'No Controller';
-    }
-  }, 500);
-
   window.addEventListener('gamepadconnected',    e => showToast('success', 'Controller Connected', e.gamepad.id));
   window.addEventListener('gamepaddisconnected', ()  => showToast('warn',  'Controller Disconnected', 'No gamepad detected'));
 }
@@ -643,7 +720,8 @@ async function captureCameraStill(id) {
 
 function initCameras() {
   loadCameraRotations();
-  loadCameraDecodeMode();
+  state.cameraDecodeMode = 'browser';
+  loadCameraSettings().catch(() => {});
   try {
     const raw = localStorage.getItem('rose_visible_cameras');
     state.cameraVisibilitySaved = raw !== null;
@@ -656,49 +734,68 @@ function initCameras() {
 
   document.getElementById('refreshCamerasBtn')?.addEventListener('click', () => refreshCameras(true));
   document.getElementById('showAllCamerasBtn')?.addEventListener('click', showAllCameras);
-  document.querySelectorAll('.camera-decode-btn').forEach(btn => {
-    btn.addEventListener('click', () => setCameraDecodeMode(btn.dataset.decodeMode));
-  });
+  document.getElementById('saveCameraBitrateBtn')?.addEventListener('click', saveCameraSettings);
   document.getElementById('closeCameraStillModal')?.addEventListener('click', closeCameraStillModal);
-  renderCameraDecodeMode();
   refreshCameras(false).catch(() => renderCameraGrid());
   setInterval(refreshCameraStatus, 3000);
 }
 
+async function loadCameraSettings() {
+  const res = await apiFetch('/api/camera-settings');
+  const settings = res.settings || {};
+  state.cameraSettings.maxBitrateKbps = Number(settings.max_bitrate_kbps || 0) || null;
+  const input = document.getElementById('cameraMaxBitrate');
+  if (input && state.cameraSettings.maxBitrateKbps) input.value = state.cameraSettings.maxBitrateKbps;
+}
+
+async function saveCameraSettings() {
+  const input = document.getElementById('cameraMaxBitrate');
+  const btn = document.getElementById('saveCameraBitrateBtn');
+  const value = Math.round(Number(input?.value || 0));
+  if (!Number.isFinite(value) || value < 50) {
+    showToast('warn', 'Invalid Bitrate', 'Enter a max bitrate of at least 50 kbps.');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  try {
+    const res = await apiFetch('/api/camera-settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ max_bitrate_kbps: value }),
+    });
+    state.cameraSettings.maxBitrateKbps = res.settings?.max_bitrate_kbps || value;
+    if (input) input.value = state.cameraSettings.maxBitrateKbps;
+    showToast('success', 'Camera Bitrate Saved', `Max bitrate scale is ${state.cameraSettings.maxBitrateKbps} kbps.`, 2500);
+  } catch (err) {
+    showToast('error', 'Camera Bitrate Save Failed', err.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function loadCameraDecodeMode() {
-  const saved = localStorage.getItem(CAMERA_DECODE_MODE_KEY);
-  state.cameraDecodeMode = saved === 'browser' ? 'browser' : 'pi';
+  state.cameraDecodeMode = 'browser';
+  localStorage.setItem(CAMERA_DECODE_MODE_KEY, 'browser');
 }
 
 function renderCameraDecodeMode() {
-  document.querySelectorAll('.camera-decode-btn').forEach(btn => {
-    const active = btn.dataset.decodeMode === state.cameraDecodeMode;
-    btn.classList.toggle('active', active);
-    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
-  });
-  updateCameraDecodeButtons();
+  state.cameraDecodeMode = 'browser';
 }
 
 function updateCameraDecodeButtons() {
-  document.querySelectorAll('.camera-native-btn').forEach(btn => {
-    const browserMode = state.cameraDecodeMode === 'browser';
-    btn.textContent = browserMode ? 'Use Pi' : 'Use Browser';
-    btn.title = browserMode
-      ? `Switch camera streams back to Raspberry Pi decode`
-      : `Switch camera streams to browser decode on this computer`;
-  });
+  state.cameraDecodeMode = 'browser';
 }
 
 function setCameraDecodeMode(mode) {
-  mode = mode === 'browser' ? 'browser' : 'pi';
-  if (state.cameraDecodeMode === mode) return;
-  state.cameraDecodeMode = mode;
-  localStorage.setItem(CAMERA_DECODE_MODE_KEY, mode);
-  renderCameraDecodeMode();
+  state.cameraDecodeMode = 'browser';
+  localStorage.setItem(CAMERA_DECODE_MODE_KEY, 'browser');
   const visibleIds = state.cameras
     .map(cam => String(cam.id))
     .filter(id => !state.hiddenCameras.has(id));
-  visibleIds.forEach(id => showCamera(id, { quiet: true, forceMode: mode }));
+  visibleIds.forEach((id, index) => scheduleShowCamera(id, {
+    quiet: true,
+    delayMs: CAMERA_START_JITTER_MS + index * 600,
+  }));
 }
 
 async function refreshCameras(force = true) {
@@ -713,6 +810,7 @@ async function refreshCameras(force = true) {
     throw err;
   }
   state.cameras = res.cameras || [];
+  applyServerCameraRotations();
   const known = new Set(state.cameras.map(cam => String(cam.id)));
   if (!state.cameraVisibilitySaved) {
     state.visibleCameras = new Set(state.cameras.map(cam => String(cam.id)));
@@ -730,6 +828,7 @@ async function refreshCameraStatus() {
   try {
     const res = await apiFetch('/api/cameras');
     state.cameras = res.cameras || [];
+    applyServerCameraRotations();
     updateCameraLabels();
     renderCameraVisibility();
     state.cameras.forEach(cam => updateCameraStatusFromMetadata(String(cam.id), cam));
@@ -741,21 +840,20 @@ function cameraIdsSignature() {
 }
 
 function retryCam(id) {
-  const safeId = cssSafeId(id);
-  const img = document.getElementById(`camImg-${safeId}`);
-  if (!img) return;
-  if (state.nativeCameras.has(String(id))) return;
+  id = String(id);
+  const img = document.getElementById(`camImg-${cssSafeId(id)}`);
+  if (!img || state.hiddenCameras.has(id)) return;
   clearCameraStatusTimer(id);
-  setCameraStatus(id, 'connecting', 'Waiting for video frames', 'Ground station MJPEG endpoint is open. Waiting for the first JPEG frame from the rover receiver.');
-  img.src = withToken(`/api/camera/${encodeURIComponent(id)}`) + `&_=${Date.now()}`;
-  state.cameraStatusTimers[id] = setTimeout(() => {
-    setCameraStatus(id, 'waiting', 'No frame received yet', 'The stream request was sent, but no decoded JPEG frame has reached the browser. Check rover camera process, Rocket M2 congestion, or packet loss.');
-  }, 6000);
-  applyCameraRotation(id);
+  setCameraStatus(id, 'connecting', 'Retrying local decode', 'Reconnecting this browser directly to the rover camera service.');
+  scheduleShowCamera(id, { quiet: true, delayMs: 500 });
 }
 
 function stopNativeCamera(id) {
   id = String(id);
+  nextCameraStartSeq(id);
+  if (state.cameraConnectTimers[id]) clearTimeout(state.cameraConnectTimers[id]);
+  delete state.cameraConnectTimers[id];
+  clearCameraStatusTimer(id);
   state.nativeCameras.delete(id);
   delete state.nativeCameraUrls[id];
   delete state.nativeCameraUrlIndex[id];
@@ -774,6 +872,19 @@ function stopNativeCamera(id) {
   }
 }
 
+function releaseCameraElements() {
+  Object.values(state.cameraConnectTimers || {}).forEach(timer => clearTimeout(timer));
+  state.cameraConnectTimers = {};
+  document.querySelectorAll('.camera-img').forEach(img => {
+    img.removeAttribute('src');
+  });
+  document.querySelectorAll('.camera-video').forEach(video => {
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+  });
+}
+
 function setNativeCameraSource(id, index = 0) {
   id = String(id);
   const urls = state.nativeCameraUrls[id] || [];
@@ -782,9 +893,23 @@ function setNativeCameraSource(id, index = 0) {
   if (!url || !img) return false;
   state.nativeCameraUrlIndex[id] = index;
   const sep = url.includes('?') ? '&' : '?';
+  img.removeAttribute('src');
   img.src = `${url}${sep}_=${Date.now()}`;
   img.classList.remove('hidden');
   return true;
+}
+
+function waitForNativeFrame(id, seq, readyDelayMs = 2500) {
+  id = String(id);
+  const check = () => {
+    if (!isCurrentCameraStart(id, seq) || !state.nativeCameras.has(id)) return;
+    const img = document.getElementById(`camImg-${cssSafeId(id)}`);
+    if (img?.naturalWidth || img?.src) {
+      setCameraStatus(id, 'live', 'Browser decode', '');
+    }
+  };
+  clearCameraStatusTimer(id);
+  state.cameraStatusTimers[id] = setTimeout(check, readyDelayMs);
 }
 
 function cameraName(id) {
@@ -816,6 +941,26 @@ function clearCameraStatusTimer(id) {
   delete state.cameraStatusTimers[id];
 }
 
+function nextCameraStartSeq(id) {
+  id = String(id);
+  state.cameraStartSeq[id] = (Number(state.cameraStartSeq[id] || 0) + 1) % 1000000;
+  return state.cameraStartSeq[id];
+}
+
+function isCurrentCameraStart(id, seq) {
+  return state.cameraStartSeq[String(id)] === seq;
+}
+
+function scheduleShowCamera(id, options = {}) {
+  id = String(id);
+  if (state.cameraConnectTimers[id]) clearTimeout(state.cameraConnectTimers[id]);
+  const delayMs = Math.max(0, Number(options.delayMs || 0));
+  state.cameraConnectTimers[id] = setTimeout(() => {
+    delete state.cameraConnectTimers[id];
+    showCamera(id, options);
+  }, delayMs);
+}
+
 function setCameraStatus(id, level, title, detail = '') {
   state.cameraStatuses[String(id)] = { level, title, detail };
   renderCameraStatus(id);
@@ -840,14 +985,9 @@ function renderCameraStatus(id) {
 
 function updateCameraStatusFromMetadata(id, cam) {
   const img = document.getElementById(`camImg-${cssSafeId(id)}`);
-  if (state.nativeCameras.has(String(id))) return;
   if (!img || state.hiddenCameras.has(String(id))) return;
-  if (!cam?.streaming) {
-    setCameraStatus(id, 'idle', 'Stream stopped', 'This camera is visible in the grid but the rover stream is not active yet.');
-    return;
-  }
-  if (!img.complete || !img.naturalWidth) {
-    setCameraStatus(id, 'connecting', 'Connecting to stream', cameraStatusDetail(cam));
+  if (!state.nativeCameras.has(String(id)) && (!img.complete || !img.naturalWidth)) {
+    setCameraStatus(id, 'connecting', 'Connecting to local decode stream', cameraStatusDetail(cam));
   }
 }
 
@@ -868,6 +1008,26 @@ function loadCameraRotations() {
   }
 }
 
+function cameraPersistKey(id) {
+  const cam = state.cameras.find(c => String(c.id) === String(id));
+  return String(cam?.stable_key || id);
+}
+
+function applyServerCameraRotations() {
+  state.cameras.forEach(cam => {
+    const id = String(cam.id);
+    const key = String(cam.stable_key || id);
+    if (Number.isFinite(Number(cam.rotation))) {
+      const rotation = Number(cam.rotation) % 360;
+      if (rotation) {
+        state.cameraRotations[id] = rotation;
+        state.cameraRotations[key] = rotation;
+      }
+    }
+  });
+  saveCameraRotations();
+}
+
 function saveCameraRotations() {
   localStorage.setItem('rose_camera_rotations', JSON.stringify(state.cameraRotations));
 }
@@ -875,7 +1035,7 @@ function saveCameraRotations() {
 function applyCameraRotation(id) {
   const img = document.getElementById(`camImg-${cssSafeId(id)}`);
   const video = document.getElementById(`camVideo-${cssSafeId(id)}`);
-  const deg = Number(state.cameraRotations[String(id)] || 0) % 360;
+  const deg = Number(state.cameraRotations[String(id)] || state.cameraRotations[cameraPersistKey(id)] || 0) % 360;
   const transform = deg ? `rotate(${deg}deg)` : '';
   if (img) img.style.transform = transform;
   if (video) video.style.transform = transform;
@@ -883,11 +1043,22 @@ function applyCameraRotation(id) {
 
 function rotateCamera(id) {
   id = String(id);
-  const next = (Number(state.cameraRotations[id] || 0) + 90) % 360;
-  if (next) state.cameraRotations[id] = next;
-  else delete state.cameraRotations[id];
+  const key = cameraPersistKey(id);
+  const next = (Number(state.cameraRotations[id] || state.cameraRotations[key] || 0) + 90) % 360;
+  if (next) {
+    state.cameraRotations[id] = next;
+    state.cameraRotations[key] = next;
+  } else {
+    delete state.cameraRotations[id];
+    delete state.cameraRotations[key];
+  }
   saveCameraRotations();
   applyCameraRotation(id);
+  apiFetch(`/api/camera/${encodeURIComponent(id)}/orientation`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rotation: next }),
+  }).catch(err => showToast('warn', 'Camera Orientation Save Failed', err.message));
 }
 
 async function hideCamera(id) {
@@ -907,32 +1078,12 @@ async function hideCamera(id) {
 
 async function showCamera(id, options = {}) {
   id = String(id);
-  const mode = options.forceMode || state.cameraDecodeMode;
-  if (mode === 'browser') {
-    return startBrowserCamera(id, options);
-  }
-  stopNativeCamera(id);
-  state.hiddenCameras.delete(id);
-  state.visibleCameras.add(id);
-  if (options.persist !== false) saveHiddenCameras();
-  renderCameraVisibility();
-  setCameraStatus(id, 'starting', 'Requesting rover stream', 'Ground station is asking the rover camera service to start or rebalance this stream.');
-  try {
-    const res = await apiFetch(`/api/camera/${encodeURIComponent(id)}/start`, { method: 'POST' });
-    const camera = res.camera;
-    if (camera) {
-      state.cameras = state.cameras.map(cam => String(cam.id) === id ? { ...cam, ...camera } : cam);
-    }
-    setCameraStatus(id, 'connecting', 'Stream requested', cameraStatusDetail(camera));
-    retryCam(id);
-  } catch (err) {
-    setCameraStatus(id, 'error', 'Camera start failed', err.message);
-    if (!options.quiet) showToast('error', 'Camera Start Failed', err.message);
-  }
+  return startBrowserCamera(id, options);
 }
 
 async function startBrowserCamera(id, options = {}) {
   id = String(id);
+  const seq = nextCameraStartSeq(id);
   const safeId = cssSafeId(id);
   const img = document.getElementById(`camImg-${safeId}`);
   if (!img) return;
@@ -942,16 +1093,18 @@ async function startBrowserCamera(id, options = {}) {
   state.visibleCameras.add(id);
   if (options.persist !== false) saveHiddenCameras();
   renderCameraVisibility();
-  setCameraStatus(id, 'starting', 'Starting browser decode', 'Stopping the RPi receiver and connecting this browser directly to the rover MJPEG stream.');
+  setCameraStatus(id, 'starting', 'Starting local decode', 'Connecting this browser directly to the rover camera stream.');
 
   try {
     const res = await apiFetch(`/api/camera/${encodeURIComponent(id)}/native`, { method: 'POST' });
+    if (!isCurrentCameraStart(id, seq)) return;
     const urls = Array.isArray(res.urls) && res.urls.length ? res.urls : [res.url].filter(Boolean);
     if (!urls.length) throw new Error('Rover camera service did not return a browser stream URL');
     state.nativeCameras.add(id);
     state.nativeCameraUrls[id] = urls;
     setNativeCameraSource(id, 0);
-    setCameraStatus(id, 'connecting', 'Browser stream requested', 'This browser is connecting directly to the rover camera service. JPEG decode happens on this computer, not on the RPi.');
+    setCameraStatus(id, 'connecting', 'Local stream requested', 'This browser is connecting directly to the rover camera service. JPEG decode happens on this computer.');
+    waitForNativeFrame(id, seq);
   } catch (err) {
     stopNativeCamera(id);
     setCameraStatus(id, 'error', 'Browser stream failed', err.message);
@@ -960,17 +1113,7 @@ async function startBrowserCamera(id, options = {}) {
 }
 
 async function showNativeCamera(id) {
-  const nextMode = state.cameraDecodeMode === 'browser' ? 'pi' : 'browser';
-  setCameraDecodeMode(nextMode);
-  if (state.cameras.length <= 1) return;
-  showToast(
-    'info',
-    'Camera Decode Mode Changed',
-    nextMode === 'browser'
-      ? 'Visible cameras are now using direct browser decode.'
-      : 'Visible cameras are now using Raspberry Pi decode.',
-    2500
-  );
+  return showCamera(id);
 }
 
 async function saveCameraLabel(id, label) {
@@ -998,7 +1141,9 @@ function showAllCameras() {
   state.visibleCameras = new Set(state.cameras.map(cam => String(cam.id)));
   saveHiddenCameras();
   renderCameraVisibility();
-  state.cameras.forEach(cam => showCamera(String(cam.id)));
+  state.cameras.forEach((cam, index) => scheduleShowCamera(String(cam.id), {
+    delayMs: CAMERA_START_JITTER_MS + index * 600,
+  }));
 }
 
 function cssSafeId(id) {
@@ -1020,7 +1165,6 @@ function renderCameraGrid() {
         <input class="camera-label-input" id="camLabel-${safeId}" data-camera-id="${escHtml(id)}" value="${escHtml(cameraName(id))}" title="Edit camera name" />
         <div class="camera-tools">
           <button class="camera-still-btn" data-camera-id="${escHtml(id)}" title="Capture HD still from ${escHtml(cameraName(id))}">Still</button>
-          <button class="camera-native-btn" data-camera-id="${escHtml(id)}" title="Switch decode mode for ${escHtml(cameraName(id))}">Use Browser</button>
           <button class="camera-rotate-btn" data-camera-id="${escHtml(id)}" title="Rotate ${escHtml(cameraName(id))} camera 90 degrees">Rotate</button>
           <button class="camera-hide-btn" data-camera-id="${escHtml(id)}" title="Hide ${escHtml(cameraName(id))} camera">Hide</button>
         </div>
@@ -1045,9 +1189,6 @@ function renderCameraGrid() {
   grid.querySelectorAll('.camera-still-btn').forEach(btn => {
     btn.addEventListener('click', () => captureCameraStill(btn.dataset.cameraId));
   });
-  grid.querySelectorAll('.camera-native-btn').forEach(btn => {
-    btn.addEventListener('click', () => showNativeCamera(btn.dataset.cameraId));
-  });
   grid.querySelectorAll('.camera-rotate-btn').forEach(btn => {
     btn.addEventListener('click', () => rotateCamera(btn.dataset.cameraId));
   });
@@ -1065,7 +1206,7 @@ function renderCameraGrid() {
           setCameraStatus(id, 'connecting', 'Trying alternate browser stream', 'The first direct rover URL was not reachable from this computer, so the browser is trying another discovered camera-service address.');
           return;
         }
-        setCameraStatus(id, 'error', 'Browser feed unavailable', 'This computer could not read the direct rover MJPEG stream. Switch back to Pi Decode or check rover camera service access.');
+        setCameraStatus(id, 'error', 'Local feed unavailable', 'This computer could not read the direct rover MJPEG stream. Check rover camera service access.');
         return;
       }
       setCameraStatus(id, 'error', 'Feed unavailable', 'The browser could not read the MJPEG stream. Retrying while the camera remains visible.');
@@ -1073,7 +1214,7 @@ function renderCameraGrid() {
     });
     img.addEventListener('load', () => {
       clearCameraStatusTimer(id);
-      setCameraStatus(id, 'live', state.nativeCameras.has(id) ? 'Browser decode' : 'Pi decode', '');
+      setCameraStatus(id, 'live', 'Local decode', '');
       applyCameraRotation(id);
     });
     if (video) {
@@ -1084,13 +1225,13 @@ function renderCameraGrid() {
       video.addEventListener('error', () => {
         if (!state.nativeCameras.has(id)) return;
         clearCameraStatusTimer(id);
-        setCameraStatus(id, 'error', 'Browser feed unavailable', 'The browser could not play the direct rover stream. Switch back to Pi Decode or restart the rover camera service.');
+        setCameraStatus(id, 'error', 'Local feed unavailable', 'The browser could not play the direct rover stream. Restart the rover camera service or check network access.');
       });
     }
     applyCameraRotation(id);
     if (!state.hiddenCameras.has(id)) {
       setCameraStatus(id, 'idle', 'Preparing stream', 'Waiting to request this rover camera stream.');
-      showCamera(id);
+      scheduleShowCamera(id, { delayMs: CAMERA_START_JITTER_MS + 400 + Math.floor(Math.random() * 1200) });
     }
   });
   updateCameraDecodeButtons();
@@ -1141,15 +1282,6 @@ function initDashboardControls() {
     });
   });
 
-  document.getElementById('timerPauseBtn')?.addEventListener('click', () => {
-    sendTimerAction(state.dashboardTimer.running ? 'pause' : 'start');
-  });
-  document.getElementById('timerStopBtn')?.addEventListener('click', () => sendTimerAction('stop'));
-  document.getElementById('timerResetBtn')?.addEventListener('click', () => sendTimerAction('reset'));
-  document.getElementById('timerLapBtn')?.addEventListener('click', () => sendTimerAction('lap'));
-
-  refreshDashboardTimer().catch(() => {});
-  setInterval(renderDashboardTimer, 120);
 }
 
 function applyMissionMode(mode) {
@@ -1163,80 +1295,6 @@ function applyMissionMode(mode) {
   });
   const active = document.querySelector('.tab-btn.active')?.dataset.tab;
   if (allowed && active && !allowed.has(active)) activateTab('dashboard');
-}
-
-function formatTimer(ms) {
-  const totalCentis = Math.max(0, Math.floor(ms / 10));
-  const centis = totalCentis % 100;
-  const totalSeconds = Math.floor(totalCentis / 100);
-  const seconds = totalSeconds % 60;
-  const minutes = Math.floor(totalSeconds / 60) % 60;
-  const hours = Math.floor(totalSeconds / 3600);
-  if (hours > 0) {
-    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(centis).padStart(2, '0')}`;
-  }
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(centis).padStart(2, '0')}`;
-}
-
-function currentTimerElapsed() {
-  const timer = state.dashboardTimer;
-  if (!timer.running) return timer.elapsedMs;
-  return timer.elapsedMs + (Date.now() - timer.receivedAt);
-}
-
-function updateDashboardTimer(timer) {
-  if (!timer || typeof timer.elapsed_ms !== 'number') return;
-  state.dashboardTimer = {
-    elapsedMs: timer.elapsed_ms,
-    running: !!timer.running,
-    laps: Array.isArray(timer.laps) ? timer.laps : [],
-    serverTs: Number(timer.server_ts || 0) * 1000,
-    receivedAt: Date.now(),
-  };
-  renderDashboardTimer();
-}
-
-function renderDashboardTimer() {
-  const display = document.getElementById('dashboardTimerDisplay');
-  if (!display) return;
-  const timer = state.dashboardTimer;
-  display.textContent = formatTimer(currentTimerElapsed());
-
-  const stateEl = document.getElementById('timerSyncState');
-  if (stateEl) {
-    stateEl.textContent = timer.running ? 'RUNNING' : 'PAUSED';
-    stateEl.className = `timer-sync-state ${timer.running ? 'running' : 'paused'}`;
-  }
-
-  const pauseBtn = document.getElementById('timerPauseBtn');
-  if (pauseBtn) pauseBtn.textContent = timer.running ? 'Pause' : 'Start';
-
-  const laps = document.getElementById('timerLaps');
-  if (!laps) return;
-  laps.innerHTML = timer.laps.slice().reverse().map(lap => `
-    <div class="timer-lap">
-      <span>Lap ${escHtml(lap.index ?? '')}</span>
-      <strong>${formatTimer(Number(lap.elapsed_ms || 0))}</strong>
-    </div>
-  `).join('');
-}
-
-async function refreshDashboardTimer() {
-  const res = await apiFetch('/api/dashboard/timer');
-  updateDashboardTimer(res.timer || {});
-}
-
-async function sendTimerAction(action) {
-  try {
-    const res = await apiFetch('/api/dashboard/timer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action }),
-    });
-    updateDashboardTimer(res.timer || {});
-  } catch (err) {
-    showToast('error', 'Timer Sync Failed', err.message);
-  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1344,7 +1402,6 @@ function connectLogWS() {
   });
 
   _logWS.addEventListener('close', e => {
-    if (e.code === 4001) return; // auth rejected — don't retry
     setTimeout(connectLogWS, Math.min(_logRetry, 30000));
     _logRetry = Math.min(_logRetry * 1.5, 30000);
   });
@@ -1572,18 +1629,26 @@ function updateSubsysStatus(payloadConn, armConn, driveConn) {
 }
 
 function updateControllerTopicHealth(armConn, driveConn) {
+  const connectedCount = (armConn ? 1 : 0) + (driveConn ? 1 : 0);
+  const headerDot = document.getElementById('controllerDot');
+  const headerCount = document.getElementById('controllerCount');
+  if (headerDot) {
+    headerDot.className = `status-dot ${connectedCount === 2 ? 'dot-green' : connectedCount === 1 ? 'dot-yellow' : 'dot-red'}`;
+  }
+  if (headerCount) headerCount.textContent = `${connectedCount}/2`;
+
   const setHealth = (name, connected) => {
     const label = connected ? 'Online' : 'Offline';
     const dotCls = connected ? 'dot-green' : 'dot-red';
-    const headerDot = document.getElementById(`${name}ControllerDot`);
-    const headerVal = document.getElementById(`${name}ControllerVal`);
     const dashDot = document.getElementById(`dash${name.charAt(0).toUpperCase() + name.slice(1)}ControllerDot`);
     const dashVal = document.getElementById(`dash${name.charAt(0).toUpperCase() + name.slice(1)}ControllerVal`);
     const dashCard = document.getElementById(`${name}ControllerCard`);
-    if (headerDot) headerDot.className = `status-dot ${dotCls}`;
-    if (headerVal) headerVal.textContent = label.toUpperCase();
     if (dashDot) dashDot.className = `status-dot ${dotCls}`;
-    if (dashVal) dashVal.textContent = `${label} on ROS network`;
+    if (dashVal) {
+      dashVal.textContent = `${label} on ROS network`;
+      dashVal.classList.toggle('online', connected);
+      dashVal.classList.toggle('offline', !connected);
+    }
     if (dashCard) dashCard.classList.toggle('offline', !connected);
   };
   setHealth('arm', !!armConn);
@@ -1659,16 +1724,9 @@ function updateSystemHealth(d) {
     setHealthStatus('sysCanDot', 'sysCanVal', 'unknown', 'No motor data');
   } else {
     const offline = motors.filter(m => !m.connected).length;
-    const activeFaults = motors.filter(m => Number(m.faults || 0) > 0).length;
-    const stickyFaults = motors.filter(m => Number(m.sticky_faults || 0) > 0).length;
-    const canState = offline || activeFaults ? 'bad' : stickyFaults ? 'warn' : 'ok';
-    const canLabel = offline
-      ? `${offline} offline`
-      : activeFaults
-        ? `${activeFaults} active faults`
-        : stickyFaults
-          ? `${stickyFaults} sticky faults`
-          : 'Nominal';
+    const online = motors.length - offline;
+    const canState = offline ? 'bad' : 'ok';
+    const canLabel = `${online}/${motors.length} online`;
     setHealthStatus('sysCanDot', 'sysCanVal', canState, canLabel);
   }
 }
@@ -1678,8 +1736,7 @@ function updateSystemHealthConnection(itemId, valId, subsystem) {
   const val = document.getElementById(valId);
   if (!dot || !val) return;
   const connected = subsystem.connected === true;
-  const status = connected ? (subsystem.status || 'nominal') : 'critical';
-  dot.className = `status-dot ${connected ? (status === 'nominal' ? 'dot-green' : status === 'degraded' ? 'dot-yellow' : 'dot-red') : 'dot-red'}`;
+  dot.className = `status-dot ${connected ? 'dot-green' : 'dot-red'}`;
   val.textContent = connected ? (subsystem.summary || 'Connected') : 'Disconnected';
 }
 
@@ -1850,7 +1907,14 @@ function updateNetworkStatus(data) {
   const updated = document.getElementById('networkUpdated');
   if (updated) updated.textContent = data.ts ? `Updated ${new Date(data.ts * 1000).toLocaleTimeString()}` : 'Not polled';
   const snmpState = document.getElementById('networkSnmpState');
-  if (snmpState) snmpState.textContent = data.snmp?.available ? 'snmpget available' : 'snmpget not installed';
+  if (snmpState) {
+    const backend = data.snmp?.backend;
+    snmpState.textContent = backend === 'snmpget'
+      ? 'snmpget available'
+      : data.snmp?.available
+        ? 'built-in SNMP'
+        : 'SNMP unavailable';
+  }
   const community = document.getElementById('networkSnmpCommunity');
   if (community) community.textContent = data.snmp?.community || '--';
 }
@@ -1903,8 +1967,8 @@ function updateSubsystemOverview(subsystems) {
   grid.innerHTML = order.map(key => {
     const s = subsystems[key] || {};
     const connected = s.connected === true;
-    const status = connected ? (s.status || 'nominal') : 'critical';
-    const dot = connected ? (status === 'nominal' ? 'dot-green' : status === 'degraded' ? 'dot-yellow' : 'dot-red') : 'dot-red';
+    const status = connected ? 'online' : 'offline';
+    const dot = connected ? 'dot-green' : 'dot-red';
     const metrics = (s.metrics || []).slice(0, 3).map(m => `
       <div class="subsystem-metric">
         <span>${escHtml(m.label || '')}</span>
@@ -1918,7 +1982,7 @@ function updateSubsystemOverview(subsystems) {
             <span class="status-dot ${dot}"></span>
             <strong>${escHtml(s.label || key)}</strong>
           </div>
-          <span class="subsystem-state">${connected ? escHtml(status).toUpperCase() : 'OFFLINE'}</span>
+          <span class="subsystem-state">${connected ? 'ONLINE' : 'OFFLINE'}</span>
         </div>
         <div class="subsystem-summary">${escHtml(s.summary || '')}</div>
         <div class="subsystem-metrics">${metrics}</div>
@@ -1929,8 +1993,7 @@ function updateSubsystemOverview(subsystems) {
 
 function motorStatus(motor) {
   if (!motor.connected) return { cls: 'badge-error', label: 'OFFLINE' };
-  if ((motor.faults || 0) || (motor.sticky_faults || 0)) return { cls: 'badge-error', label: 'FAULT' };
-  return { cls: 'badge-ok', label: 'OK' };
+  return { cls: 'badge-ok', label: 'ONLINE' };
 }
 
 function formatFaultSummary(motor) {
@@ -1946,6 +2009,12 @@ function formatFaultSummary(motor) {
 function updateMotorTelemetry(motorTelemetry) {
   renderMotorTable('drive', motorTelemetry.drive || {});
   renderMotorTable('arm', motorTelemetry.arm || {});
+  updateMotorHeaderCount('drive', motorTelemetry.drive || {});
+  updateMotorHeaderCount('arm', motorTelemetry.arm || {});
+}
+
+function updateMotorHeaderCount(group, motorsById) {
+  return;
 }
 
 function renderMotorTable(group, motorsById) {
@@ -1954,7 +2023,7 @@ function renderMotorTable(group, motorsById) {
   const motors = Object.values(motorsById).sort((a, b) => Number(a.device_id) - Number(b.device_id));
   const header = `
     <div class="drive-row drive-header">
-      <span>Motor</span><span>Temp</span><span>Amps</span><span>Volts</span><span>Faults</span><span></span>
+      <span>Motor</span><span>Temp</span><span>Amps</span><span>Volts</span><span>Status</span><span></span>
     </div>
   `;
   if (!motors.length) {
@@ -1963,7 +2032,6 @@ function renderMotorTable(group, motorsById) {
   }
   const rows = motors.map(motor => {
     const status = motorStatus(motor);
-    const faults = formatFaultSummary(motor);
     const id = Number(motor.device_id) || 0;
     const rawFaults = `F 0x${Number(motor.faults || 0).toString(16).padStart(4, '0')} / S 0x${Number(motor.sticky_faults || 0).toString(16).padStart(4, '0')}`;
     return `
@@ -1972,7 +2040,7 @@ function renderMotorTable(group, motorsById) {
         <span>${fmtNumber(motor.motor_temperature_c, 1, ' °C')}</span>
         <span>${fmtNumber(motor.motor_current_a, 1, ' A')}</span>
         <span>${fmtNumber(motor.bus_voltage_v, 1, ' V')}</span>
-        <span class="${status.cls}" title="${escHtml(faults)}">${status.label}</span>
+        <span class="${status.cls}">${status.label}</span>
         <button class="btn-secondary btn-sm clear-faults-btn" data-group="${escHtml(group)}" data-device-id="${id}">Clear</button>
       </div>
     `;
@@ -2122,6 +2190,9 @@ function handleRadarFile(e) {
 // ══════════════════════════════════════════════════════════════
 
 function bootApp() {
+  if (_appBooted) return;
+  _appBooted = true;
+
   initTabs();
   initEStop();
   initWarningModal();
@@ -2151,3 +2222,5 @@ function bootApp() {
 document.addEventListener('DOMContentLoaded', () => {
   initAuth();   // handles login screen, then calls bootApp() on success
 });
+
+window.addEventListener('pagehide', releaseCameraElements);

@@ -1,13 +1,14 @@
 """
 RoSE Ground Station — FastAPI server
 Provides MJPEG camera streams, WebSocket telemetry/log feeds, and REST control APIs.
-All routes (except /api/auth and the static login page) require a valid bearer token.
+The UI/API are passwordless; active UI clients are capped to protect the radio link.
 """
 import asyncio
 import json
 import logging
 import os
 import socket
+import threading
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import (
-    Depends, FastAPI, HTTPException, Query, Security, WebSocket, WebSocketDisconnect,
+    Depends, FastAPI, HTTPException, Query, Request, Security, WebSocket, WebSocketDisconnect,
 )
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -23,9 +24,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from .auth import create_token, validate_token, verify_password
+from .auth import create_token
 from .config import config
 from .ros2_bridge import bridge
+
+_camera_control_lock = threading.RLock()
+MAX_UI_CLIENTS = 3
+CLIENT_TIMEOUT_S = 20.0
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -51,18 +56,13 @@ async def require_auth(
     creds: Optional[HTTPAuthorizationCredentials] = Security(_bearer),
     token: Optional[str] = Query(None, alias="token"),
 ) -> str:
-    """Accept token via Authorization: Bearer header OR ?token= query param."""
-    t = (creds.credentials if creds else None) or token
-    if not validate_token(t):
-        raise HTTPException(status_code=401, detail="Invalid or missing token")
-    return t  # type: ignore[return-value]
+    """Passwordless mode keeps this dependency for route compatibility."""
+    return (creds.credentials if creds else None) or token or ""
 
 
 async def ws_auth(token: Optional[str] = Query(None)) -> str:
-    """WebSocket-specific auth — token must come as query param."""
-    if not validate_token(token):
-        raise HTTPException(status_code=403, detail="Invalid or missing token")
-    return token  # type: ignore[return-value]
+    """Passwordless mode keeps this dependency for route compatibility."""
+    return token or ""
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +346,76 @@ telemetry_mgr = ConnectionManager()
 log_mgr = ConnectionManager()
 
 
+class UIClientManager:
+    def __init__(self, max_clients: int = MAX_UI_CLIENTS):
+        self.max_clients = int(max_clients)
+        self._clients: dict[str, dict] = {}
+        self._lock = asyncio.Lock()
+
+    def _prune_locked(self):
+        now = time.time()
+        expired = [
+            client_id
+            for client_id, info in self._clients.items()
+            if now - float(info.get("last_seen", 0)) > CLIENT_TIMEOUT_S
+        ]
+        for client_id in expired:
+            self._clients.pop(client_id, None)
+
+    async def connect(self, client_id: str, request: Request) -> dict:
+        client_id = client_id.strip()[:120]
+        if not client_id:
+            raise HTTPException(status_code=400, detail="Missing client_id")
+        async with self._lock:
+            self._prune_locked()
+            is_existing = client_id in self._clients
+            if not is_existing and len(self._clients) >= self.max_clients:
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Ground station UI is full ({self.max_clients}/{self.max_clients} clients connected).",
+                )
+            self._clients[client_id] = {
+                "client_id": client_id,
+                "ip": request.client.host if request.client else "",
+                "user_agent": request.headers.get("user-agent", "")[:180],
+                "connected_at": self._clients.get(client_id, {}).get("connected_at", time.time()),
+                "last_seen": time.time(),
+            }
+            return self.snapshot_locked()
+
+    async def heartbeat(self, client_id: str) -> dict:
+        async with self._lock:
+            self._prune_locked()
+            if client_id not in self._clients:
+                raise HTTPException(status_code=409, detail="Client session is not registered")
+            self._clients[client_id]["last_seen"] = time.time()
+            return self.snapshot_locked()
+
+    async def disconnect(self, client_id: str):
+        async with self._lock:
+            self._clients.pop(client_id, None)
+
+    async def touch(self, client_id: str):
+        async with self._lock:
+            if client_id in self._clients:
+                self._clients[client_id]["last_seen"] = time.time()
+
+    async def snapshot(self) -> dict:
+        async with self._lock:
+            self._prune_locked()
+            return self.snapshot_locked()
+
+    def snapshot_locked(self) -> dict:
+        return {
+            "max_clients": self.max_clients,
+            "active_count": len(self._clients),
+            "clients": list(self._clients.values()),
+        }
+
+
+ui_clients = UIClientManager()
+
+
 class DashboardTimer:
     def __init__(self):
         self.elapsed_ms = 0
@@ -476,6 +546,38 @@ def _camera_labels_path() -> Path:
     return path
 
 
+def _camera_settings_path() -> Path:
+    path = Path(config.camera_settings_path)
+    if not path.is_absolute():
+        path = Path(__file__).parent.parent / path
+    return path
+
+
+def _load_camera_settings() -> dict:
+    path = _camera_settings_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _save_camera_settings(settings: dict) -> dict:
+    path = _camera_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return settings
+
+
+def _apply_camera_settings(settings: dict):
+    max_bitrate = settings.get("max_bitrate_kbps")
+    try:
+        max_bitrate = int(max_bitrate)
+    except (TypeError, ValueError):
+        return
+    config.rover_camera_bitrate = max(50, min(10000, max_bitrate))
+
+
 def _load_camera_labels() -> dict[str, str]:
     path = _camera_labels_path()
     try:
@@ -502,11 +604,18 @@ def _save_camera_labels(labels: dict[str, str]) -> dict[str, str]:
 
 def _apply_camera_labels(cameras: list[dict]) -> list[dict]:
     labels = _load_camera_labels()
+    settings = _load_camera_settings()
+    rotations = settings.get("camera_rotations") if isinstance(settings.get("camera_rotations"), dict) else {}
     for camera in cameras:
         camera_id = str(camera.get("id") or "")
-        if camera_id in labels:
-            camera["label"] = labels[camera_id]
-            camera["custom_label"] = labels[camera_id]
+        stable_key = str(camera.get("stable_key") or camera_id)
+        label = labels.get(stable_key) or labels.get(camera_id)
+        if label:
+            camera["label"] = label
+            camera["custom_label"] = label
+        camera["stable_key"] = stable_key
+        if stable_key in rotations or camera_id in rotations:
+            camera["rotation"] = int(rotations.get(stable_key, rotations.get(camera_id, 0))) % 360
     return cameras
 
 
@@ -517,6 +626,18 @@ def _safe_host(host: str) -> str:
     if len(host) > 253 or any(c.isspace() for c in host):
         raise HTTPException(status_code=400, detail="Rocket IP/host contains invalid characters")
     return host
+
+
+def _tcp_latency_ms(host: str, timeout_s: float) -> tuple[Optional[float], Optional[str]]:
+    last_error: Optional[str] = None
+    for port in (80, 443, 22):
+        started = time.perf_counter()
+        try:
+            with socket.create_connection((host, port), timeout=timeout_s):
+                return round((time.perf_counter() - started) * 1000.0, 1), None
+        except OSError as e:
+            last_error = f"tcp/{port}: {e}"
+    return None, last_error or "tcp reachability failed"
 
 
 async def _ping_latency_ms(host: str, timeout_s: float) -> tuple[Optional[float], Optional[str]]:
@@ -531,7 +652,12 @@ async def _ping_latency_ms(host: str, timeout_s: float) -> tuple[Optional[float]
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s + 0.5)
-    except (OSError, asyncio.TimeoutError) as e:
+    except OSError as e:
+        latency, tcp_error = await asyncio.to_thread(_tcp_latency_ms, host, timeout_s)
+        if latency is not None:
+            return latency, None
+        return None, tcp_error or str(e)
+    except asyncio.TimeoutError as e:
         return None, str(e)
     if proc.returncode != 0:
         msg = (stderr or stdout).decode("utf-8", "ignore").strip().splitlines()
@@ -547,7 +673,120 @@ async def _ping_latency_ms(host: str, timeout_s: float) -> tuple[Optional[float]
     return round((time.perf_counter() - started) * 1000.0, 1), None
 
 
+def _ber_len(length: int) -> bytes:
+    if length < 0x80:
+        return bytes([length])
+    raw = int(length).to_bytes((int(length).bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(raw)]) + raw
+
+
+def _ber_tlv(tag: int, payload: bytes) -> bytes:
+    return bytes([tag]) + _ber_len(len(payload)) + payload
+
+
+def _ber_int(value: int) -> bytes:
+    raw = int(value).to_bytes(max(1, (int(value).bit_length() + 8) // 8), "big", signed=True)
+    while len(raw) > 1 and raw[0] == 0x00 and raw[1] < 0x80:
+        raw = raw[1:]
+    return _ber_tlv(0x02, raw)
+
+
+def _ber_oid(oid: str) -> bytes:
+    parts = [int(p) for p in oid.strip(".").split(".") if p]
+    if len(parts) < 2:
+        raise ValueError(f"invalid SNMP OID: {oid}")
+    encoded = bytearray([parts[0] * 40 + parts[1]])
+    for part in parts[2:]:
+        stack = [part & 0x7F]
+        part >>= 7
+        while part:
+            stack.append(0x80 | (part & 0x7F))
+            part >>= 7
+        encoded.extend(reversed(stack))
+    return _ber_tlv(0x06, bytes(encoded))
+
+
+def _ber_read(buf: bytes, pos: int = 0) -> tuple[int, bytes, int]:
+    if pos + 2 > len(buf):
+        raise ValueError("truncated SNMP response")
+    tag = buf[pos]
+    pos += 1
+    length = buf[pos]
+    pos += 1
+    if length & 0x80:
+        size = length & 0x7F
+        if size == 0 or pos + size > len(buf):
+            raise ValueError("invalid SNMP length")
+        length = int.from_bytes(buf[pos:pos + size], "big")
+        pos += size
+    end = pos + length
+    if end > len(buf):
+        raise ValueError("truncated SNMP value")
+    return tag, buf[pos:end], end
+
+
+def _ber_value_to_number(tag: int, payload: bytes) -> Optional[float]:
+    if tag in (0x02, 0x41, 0x42, 0x43, 0x46):
+        signed = tag == 0x02
+        return float(int.from_bytes(payload or b"\x00", "big", signed=signed))
+    if tag == 0x04:
+        text = payload.decode("utf-8", "ignore").strip()
+        try:
+            return float(text.split()[0])
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _snmp_get_builtin(host: str, oid: str, timeout_s: float) -> Optional[float]:
+    request_id = int((time.time() * 1000) % 0x7FFFFFFF)
+    varbind = _ber_tlv(0x30, _ber_oid(oid) + _ber_tlv(0x05, b""))
+    varbinds = _ber_tlv(0x30, varbind)
+    pdu = _ber_tlv(0xA0, _ber_int(request_id) + _ber_int(0) + _ber_int(0) + varbinds)
+    message = _ber_tlv(
+        0x30,
+        _ber_int(1) + _ber_tlv(0x04, config.rocket_snmp_community.encode("utf-8")) + pdu,
+    )
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout_s)
+            sock.sendto(message, (host, 161))
+            data, _ = sock.recvfrom(4096)
+    except OSError:
+        return None
+
+    try:
+        tag, outer, _ = _ber_read(data)
+        if tag != 0x30:
+            return None
+        _, _, pos = _ber_read(outer, 0)      # version
+        _, _, pos = _ber_read(outer, pos)    # community
+        pdu_tag, pdu_body, _ = _ber_read(outer, pos)
+        if pdu_tag not in (0xA2, 0xA0):
+            return None
+        _, _, p = _ber_read(pdu_body, 0)     # request id
+        _, err_payload, p = _ber_read(pdu_body, p)
+        if int.from_bytes(err_payload or b"\x00", "big", signed=True) != 0:
+            return None
+        _, _, p = _ber_read(pdu_body, p)     # error index
+        list_tag, varbind_list, _ = _ber_read(pdu_body, p)
+        if list_tag != 0x30:
+            return None
+        vb_tag, varbind_body, _ = _ber_read(varbind_list, 0)
+        if vb_tag != 0x30:
+            return None
+        _, _, vb_pos = _ber_read(varbind_body, 0)
+        value_tag, value_payload, _ = _ber_read(varbind_body, vb_pos)
+        return _ber_value_to_number(value_tag, value_payload)
+    except (ValueError, IndexError):
+        return None
+
+
 async def _snmp_get(host: str, oid: str, timeout_s: float) -> Optional[float]:
+    if not shutil_which("snmpget"):
+        return await asyncio.to_thread(_snmp_get_builtin, host, oid, timeout_s)
+
     cmd = [
         "snmpget",
         "-v2c",
@@ -618,13 +857,12 @@ async def _rocket_status(key: str, host: str) -> dict:
     status["error"] = ping_error
 
     snmp_values: dict[str, Optional[float]] = {}
-    if shutil_which("snmpget"):
-        fields = list(SNMP_OIDS.keys())
-        values = await asyncio.gather(*[
-            _snmp_first(host, SNMP_OIDS[field], timeout_s)
-            for field in fields
-        ])
-        snmp_values = dict(zip(fields, values))
+    fields = list(SNMP_OIDS.keys())
+    values = await asyncio.gather(*[
+        _snmp_first(host, SNMP_OIDS[field], timeout_s)
+        for field in fields
+    ])
+    snmp_values = dict(zip(fields, values))
 
     for field, value in snmp_values.items():
         if value is not None:
@@ -669,7 +907,8 @@ async def _network_status() -> dict:
         "config": cfg.dict(),
         "rockets": {"m2": m2, "m900": m900},
         "snmp": {
-            "available": bool(shutil_which("snmpget")),
+            "available": True,
+            "backend": "snmpget" if shutil_which("snmpget") else "builtin",
             "community": config.rocket_snmp_community,
         },
         "ts": time.time(),
@@ -731,6 +970,7 @@ async def _log_broadcast():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _apply_camera_settings(_load_camera_settings())
     bridge.add_log("INFO", "API server started", "api")
     ips = _get_local_ips()
     for ip in ips:
@@ -766,17 +1006,36 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 class LoginRequest(BaseModel):
-    password: str
+    password: str = ""
 
 
 @app.post("/api/auth", summary="Authenticate with password, receive session token")
 async def login(req: LoginRequest):
-    if not verify_password(req.password):
-        bridge.add_log("WARN", "Failed login attempt", "auth")
-        raise HTTPException(status_code=401, detail="Incorrect password")
     token = create_token()
-    bridge.add_log("INFO", "New session authenticated", "auth")
+    bridge.add_log("INFO", "Passwordless session token issued", "auth")
     return {"token": token}
+
+
+class ClientSessionRequest(BaseModel):
+    client_id: str
+
+
+@app.post("/api/session/connect")
+async def connect_ui_client(req: ClientSessionRequest, request: Request):
+    session = await ui_clients.connect(req.client_id, request)
+    return {"ok": True, "session": session}
+
+
+@app.post("/api/session/heartbeat")
+async def heartbeat_ui_client(req: ClientSessionRequest):
+    session = await ui_clients.heartbeat(req.client_id)
+    return {"ok": True, "session": session}
+
+
+@app.post("/api/session/disconnect")
+async def disconnect_ui_client(req: ClientSessionRequest):
+    await ui_clients.disconnect(req.client_id)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +1051,7 @@ async def server_info():
         "port": config.port,
         "hostname": socket.gethostname(),
         "urls": [f"http://{ip}:{config.port}" for ip in ips],
+        "client_limit": await ui_clients.snapshot(),
     }
 
 
@@ -801,7 +1061,7 @@ async def server_info():
 
 @app.get("/api/health")
 async def health(token: str = Depends(require_auth)):
-    return {"status": "ok", "ts": time.time()}
+    return {"status": "ok", "ts": time.time(), "client_limit": await ui_clients.snapshot()}
 
 
 # ---------------------------------------------------------------------------
@@ -809,17 +1069,20 @@ async def health(token: str = Depends(require_auth)):
 # ---------------------------------------------------------------------------
 
 async def _mjpeg_generator(camera_id: str):
-    interval = 1.0 / config.camera_fps
+    idle_sleep = max(0.01, min(0.1, 1.0 / max(1, config.camera_fps * 2)))
+    last_seq = -1
     while True:
-        frame = bridge.get_camera_frame(camera_id)
-        if frame:
+        frame, seq = bridge.get_camera_frame_packet(camera_id)
+        if frame and seq != last_seq:
+            last_seq = seq
             yield (
                 b"--frame\r\n"
+                b"Cache-Control: no-store\r\n"
                 b"Content-Type: image/jpeg\r\n\r\n"
                 + frame
                 + b"\r\n"
             )
-        await asyncio.sleep(interval)
+        await asyncio.sleep(idle_sleep)
 
 
 @app.get("/api/camera/{camera_id}")
@@ -827,11 +1090,9 @@ async def camera_stream(
     camera_id: str,
     _token: str = Depends(require_auth),
 ):
-    if not any(str(c.get("id")) == str(camera_id) for c in bridge.get_cameras()):
-        raise HTTPException(status_code=404, detail="Camera not found")
-    return StreamingResponse(
-        _mjpeg_generator(str(camera_id)),
-        media_type="multipart/x-mixed-replace; boundary=frame",
+    raise HTTPException(
+        status_code=410,
+        detail="Raspberry Pi camera decode is disabled. Use /api/camera/{camera_id}/native for local browser decode.",
     )
 
 
@@ -864,33 +1125,90 @@ class CameraLabelRequest(BaseModel):
 async def update_camera_label(camera_id: str, req: CameraLabelRequest, _token: str = Depends(require_auth)):
     camera_id = str(camera_id)
     label = req.label.strip()
+    camera = next((c for c in bridge.get_cameras() if str(c.get("id")) == camera_id), {"id": camera_id})
+    stable_key = str(camera.get("stable_key") or camera_id)
     labels = _load_camera_labels()
     if label:
+        labels[stable_key] = label
         labels[camera_id] = label
     else:
+        labels.pop(stable_key, None)
         labels.pop(camera_id, None)
     _save_camera_labels(labels)
 
-    camera = next((c for c in bridge.get_cameras() if str(c.get("id")) == camera_id), {"id": camera_id})
     fallback = str(camera.get("device") or camera.get("id") or camera_id)
     bridge.set_camera_label(camera_id, label or fallback)
     camera = next((c for c in bridge.get_cameras() if str(c.get("id")) == camera_id), {"id": camera_id})
     return {"camera": _apply_camera_labels([camera])[0], "labels": labels}
 
 
+class CameraOrientationRequest(BaseModel):
+    rotation: int = Field(0, ge=0, le=359)
+
+
+@app.post("/api/camera/{camera_id}/orientation")
+async def update_camera_orientation(camera_id: str, req: CameraOrientationRequest, _token: str = Depends(require_auth)):
+    camera_id = str(camera_id)
+    camera = next((c for c in bridge.get_cameras() if str(c.get("id")) == camera_id), {"id": camera_id})
+    stable_key = str(camera.get("stable_key") or camera_id)
+    rotation = int(req.rotation) % 360
+    settings = _load_camera_settings()
+    rotations = settings.get("camera_rotations")
+    if not isinstance(rotations, dict):
+        rotations = {}
+    if rotation:
+        rotations[stable_key] = rotation
+        rotations[camera_id] = rotation
+    else:
+        rotations.pop(stable_key, None)
+        rotations.pop(camera_id, None)
+    settings["camera_rotations"] = rotations
+    _save_camera_settings(settings)
+    camera["rotation"] = rotation
+    return {"ok": True, "camera": _apply_camera_labels([camera])[0]}
+
+
+class CameraSettingsRequest(BaseModel):
+    max_bitrate_kbps: int = Field(..., ge=50, le=10000)
+
+
+@app.get("/api/camera-settings")
+async def get_camera_settings(_token: str = Depends(require_auth)):
+    settings = _load_camera_settings()
+    _apply_camera_settings(settings)
+    return {
+        "settings": {
+            "max_bitrate_kbps": int(config.rover_camera_bitrate),
+            "min_bitrate_kbps": int(config.rover_camera_min_bitrate),
+            "max_total_bitrate_kbps": int(config.rover_camera_max_total_bitrate),
+            "units": "kbps",
+        }
+    }
+
+
+@app.put("/api/camera-settings")
+async def update_camera_settings(req: CameraSettingsRequest, _token: str = Depends(require_auth)):
+    settings = _load_camera_settings()
+    settings["max_bitrate_kbps"] = int(req.max_bitrate_kbps)
+    _save_camera_settings(settings)
+    _apply_camera_settings(settings)
+    bridge.add_log("INFO", f"Camera max bitrate set to {config.rover_camera_bitrate} kbps", "camera")
+    return await get_camera_settings(_token)
+
+
 @app.post("/api/camera/{camera_id}/start")
 async def start_camera(camera_id: str, _token: str = Depends(require_auth)):
-    try:
-        camera = bridge.start_camera(camera_id, _get_camera_client_ip())
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    return {"camera": _apply_camera_labels([camera])[0]}
+    raise HTTPException(
+        status_code=410,
+        detail="Raspberry Pi camera decode is disabled. Use /api/camera/{camera_id}/native for local browser decode.",
+    )
 
 
 @app.post("/api/camera/{camera_id}/native")
 async def native_camera(camera_id: str, _token: str = Depends(require_auth)):
     try:
-        stream = bridge.native_camera(camera_id)
+        with _camera_control_lock:
+            stream = bridge.native_camera(camera_id)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
     return stream
@@ -898,7 +1216,9 @@ async def native_camera(camera_id: str, _token: str = Depends(require_auth)):
 
 @app.post("/api/camera/{camera_id}/stop")
 async def stop_camera(camera_id: str, _token: str = Depends(require_auth)):
-    return {"camera": _apply_camera_labels([bridge.stop_camera(camera_id)])[0]}
+    with _camera_control_lock:
+        camera = bridge.stop_camera(camera_id)
+    return {"camera": _apply_camera_labels([camera])[0]}
 
 
 @app.post("/api/camera/{camera_id}/still")
@@ -914,13 +1234,12 @@ async def capture_camera_still(camera_id: str, _token: str = Depends(require_aut
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws/telemetry")
-async def ws_telemetry(ws: WebSocket, token: Optional[str] = Query(None)):
-    if not validate_token(token):
-        await ws.close(code=4001)
-        return
+async def ws_telemetry(ws: WebSocket, token: Optional[str] = Query(None), client_id: Optional[str] = Query(None)):
     await telemetry_mgr.connect(ws)
     try:
         while True:
+            if client_id:
+                await ui_clients.touch(client_id)
             await ws.receive_text()
     except WebSocketDisconnect:
         pass
@@ -929,10 +1248,7 @@ async def ws_telemetry(ws: WebSocket, token: Optional[str] = Query(None)):
 
 
 @app.websocket("/ws/logs")
-async def ws_logs(ws: WebSocket, token: Optional[str] = Query(None)):
-    if not validate_token(token):
-        await ws.close(code=4001)
-        return
+async def ws_logs(ws: WebSocket, token: Optional[str] = Query(None), client_id: Optional[str] = Query(None)):
     await log_mgr.connect(ws)
     backlog = bridge.get_logs_since(0)[-200:]
     if backlog:
@@ -1038,6 +1354,11 @@ async def system_overview(_t: str = Depends(require_auth)):
     system["led_controller"] = bridge.get_led_controller()
     system["motor_telemetry"] = bridge.get_motor_telemetry()
     return system
+
+
+@app.get("/api/gps")
+async def gps_status(_t: str = Depends(require_auth)):
+    return {"gnss": bridge.get_gnss()}
 
 
 class DashboardTimerAction(BaseModel):

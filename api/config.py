@@ -55,12 +55,22 @@ class Config:
     rover_camera_max_total_bitrate: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_MAX_TOTAL_BITRATE", "1600")))
     rover_camera_still_max_width: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_STILL_MAX_WIDTH", "1920")))
     rover_camera_still_max_height: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_STILL_MAX_HEIGHT", "1080")))
-    camera_udp_buffer_size: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_UDP_BUFFER_SIZE", "262144")))
+    camera_udp_buffer_size: int = field(default_factory=lambda: int(os.environ.get("GS_CAMERA_UDP_BUFFER_SIZE", "65536")))
 
     # ROS2 topics — sensors
     gnss_topic: str = "/gnss/fix"
+    gnss_topics: list[str] = field(default_factory=lambda: [
+        topic.strip()
+        for topic in os.environ.get("GS_GNSS_TOPICS", "/gnss/fix,/ublox_gps_node/fix").split(",")
+        if topic.strip()
+    ])
     battery_topic: str = "/battery/state"
     imu_topic: str = "/imu/data"
+    imu_topics: list[str] = field(default_factory=lambda: [
+        topic.strip()
+        for topic in os.environ.get("GS_IMU_TOPICS", "/imu/data,/zed/zed_node/imu/data").split(",")
+        if topic.strip()
+    ])
     jetson_temp_topic: str = "/jetson/temperature"
     jetson_ip_topic: str = "/jetson/ip"
     payload_temperature_topic: str = "/payload/arduino/temperature"
@@ -88,6 +98,9 @@ class Config:
     )
     camera_labels_path: str = field(
         default_factory=lambda: os.environ.get("GS_CAMERA_LABELS_PATH", "data/camera_labels.json")
+    )
+    camera_settings_path: str = field(
+        default_factory=lambda: os.environ.get("GS_CAMERA_SETTINGS_PATH", "data/camera_settings.json")
     )
     rocket_snmp_community: str = field(default_factory=lambda: os.environ.get("GS_ROCKET_SNMP_COMMUNITY", "public"))
     rocket_poll_timeout_s: float = field(default_factory=lambda: float(os.environ.get("GS_ROCKET_POLL_TIMEOUT_S", "1.2")))

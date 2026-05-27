@@ -4,10 +4,12 @@ Provides MJPEG camera streams, WebSocket telemetry/log feeds, and REST control A
 The UI/API are passwordless; active UI clients are capped to protect the radio link.
 """
 import asyncio
+import fcntl
 import json
 import logging
 import os
 import socket
+import struct
 import threading
 import time
 import urllib.parse
@@ -69,25 +71,45 @@ async def ws_auth(token: Optional[str] = Query(None)) -> str:
 # Server info helpers
 # ---------------------------------------------------------------------------
 
-def _get_local_ips() -> list[str]:
+def _append_ip(ips: list[str], ip: str) -> None:
+    if not ip or ip.startswith("127.") or ip == "0.0.0.0":
+        return
+    if ip not in ips:
+        ips.append(ip)
+
+
+def _interface_ipv4_addresses() -> list[str]:
+    """Read LAN IPv4 addresses directly from interfaces.
+
+    The Pi often has a rover/router LAN but no internet default route. Interface
+    enumeration keeps /api/info useful in that field setup.
+    """
     ips: list[str] = []
-    # Primary interface (connects out to internet routing)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        primary = s.getsockname()[0]
-        s.close()
-        if primary and not primary.startswith("127."):
-            ips.append(primary)
-    except Exception:
-        pass
+        interfaces = socket.if_nameindex()
+    except OSError:
+        return ips
+
+    for _, name in interfaces:
+        if name == "lo":
+            continue
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                ifreq = struct.pack("256s", name[:15].encode("utf-8"))
+                res = fcntl.ioctl(s.fileno(), 0x8915, ifreq)  # SIOCGIFADDR
+                _append_ip(ips, socket.inet_ntoa(res[20:24]))
+        except OSError:
+            continue
+    return ips
+
+
+def _get_local_ips() -> list[str]:
+    ips: list[str] = _interface_ipv4_addresses()
 
     # All addresses bound to the hostname
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
+            _append_ip(ips, info[4][0])
     except Exception:
         pass
 

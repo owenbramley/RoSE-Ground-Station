@@ -616,6 +616,37 @@ html, body {
   flex: 1;
   min-height: 360px;
   background: #0a1525;
+  overflow: hidden;
+  user-select: none;
+}
+
+.offline-map-layer,
+.offline-map-trail {
+  position: absolute;
+  inset: 0;
+}
+
+.offline-map-layer {
+  z-index: 1;
+}
+
+.offline-map-tile {
+  position: absolute;
+  width: 256px;
+  height: 256px;
+  filter: brightness(0.68) saturate(0.2) grayscale(0.85);
+  pointer-events: none;
+}
+
+.offline-map-trail {
+  z-index: 2;
+  pointer-events: none;
+}
+
+.offline-map-marker {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
 }
 
 .gps-map-overlay {
@@ -1647,18 +1678,6 @@ html, body {
   border-top: 1px solid var(--border); padding-top: 14px; margin-top: -4px;
 }
 .auth-footer code { font-family: var(--mono); font-size: 10px; color: var(--accent-dim); }
-
-/* ══════════════════════════════════════════════════════════
-   LEAFLET OVERRIDES
-══════════════════════════════════════════════════════════ */
-.leaflet-container { background: #0a1525 !important; }
-.leaflet-tile { filter: brightness(0.68) saturate(0.2) grayscale(0.85); }
-.leaflet-control-attribution { display: none; }
-.leaflet-control-zoom a {
-  background: var(--panel2) !important;
-  color: var(--text) !important;
-  border-color: var(--border) !important;
-}
 
 @media (max-width: 1100px) {
   #header {

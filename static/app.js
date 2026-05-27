@@ -520,24 +520,178 @@ let _roverMarker = null;
 let _gpsTrail = null;
 let _trailPoints = [];
 const MAX_TRAIL = 120;
+const MAP_TILE_SIZE = 256;
+const MAP_MIN_ZOOM = 7;
+const MAP_MAX_ZOOM = 16;
+const MAP_NATIVE_ZOOM = 15;
+
+function clamp(n, min, max) {
+  return Math.min(max, Math.max(min, n));
+}
+
+function mapTileUrl(z, x, y) {
+  const nativeZ = Math.min(z, MAP_NATIVE_ZOOM);
+  const scale = 2 ** (z - nativeZ);
+  const nativeX = Math.floor(x / scale);
+  const nativeY = Math.floor(y / scale);
+  return `/map_tiles/usgs_topo/${nativeZ}/${nativeX}/${nativeY}.jpg`;
+}
+
+function latLonToWorld(lat, lon, zoom) {
+  const sinLat = Math.sin(clamp(lat, -85.05112878, 85.05112878) * Math.PI / 180);
+  const scale = MAP_TILE_SIZE * (2 ** zoom);
+  return {
+    x: ((lon + 180) / 360) * scale,
+    y: (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * scale,
+  };
+}
+
+class OfflineTileMap {
+  constructor(container, center, zoom) {
+    this.container = container;
+    this.center = center;
+    this.zoom = clamp(zoom, MAP_MIN_ZOOM, MAP_MAX_ZOOM);
+    this.tiles = new Map();
+
+    this.layer = document.createElement('div');
+    this.layer.className = 'offline-map-layer';
+    this.trailSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    this.trailSvg.classList.add('offline-map-trail');
+    this.trailLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    this.trailLine.setAttribute('fill', 'none');
+    this.trailLine.setAttribute('stroke', '#ff37a8');
+    this.trailLine.setAttribute('stroke-width', '2');
+    this.trailLine.setAttribute('stroke-opacity', '0.5');
+    this.trailSvg.appendChild(this.trailLine);
+
+    const overlay = container.querySelector('#gpsMapOverlay');
+    container.insertBefore(this.layer, overlay || null);
+    container.insertBefore(this.trailSvg, overlay || null);
+
+    window.addEventListener('resize', () => this.invalidateSize());
+    this.render();
+  }
+
+  project(ll) {
+    const centerPx = latLonToWorld(this.center[0], this.center[1], this.zoom);
+    const pointPx = latLonToWorld(ll[0], ll[1], this.zoom);
+    const rect = this.container.getBoundingClientRect();
+    return {
+      x: (rect.width / 2) + pointPx.x - centerPx.x,
+      y: (rect.height / 2) + pointPx.y - centerPx.y,
+    };
+  }
+
+  getBounds() {
+    const rect = this.container.getBoundingClientRect();
+    return {
+      contains: ll => {
+        const p = this.project(ll);
+        return p.x >= 0 && p.x <= rect.width && p.y >= 0 && p.y <= rect.height;
+      },
+    };
+  }
+
+  panTo(ll) {
+    this.center = ll;
+    this.render();
+  }
+
+  invalidateSize() {
+    this.render();
+  }
+
+  setMarker(marker) {
+    this.marker = marker;
+    this.container.insertBefore(marker.el, this.trailSvg.nextSibling);
+    this.positionMarker();
+  }
+
+  positionMarker() {
+    if (!this.marker) return;
+    const p = this.project(this.marker.ll);
+    this.marker.el.style.transform = `translate(${p.x - 15}px, ${p.y - 15}px)`;
+  }
+
+  setTrail(points) {
+    const projected = points.map(ll => {
+      const p = this.project(ll);
+      return `${p.x.toFixed(1)},${p.y.toFixed(1)}`;
+    });
+    this.trailLine.setAttribute('points', projected.join(' '));
+  }
+
+  render() {
+    const rect = this.container.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+
+    const centerPx = latLonToWorld(this.center[0], this.center[1], this.zoom);
+    const minX = Math.floor((centerPx.x - rect.width / 2) / MAP_TILE_SIZE);
+    const maxX = Math.floor((centerPx.x + rect.width / 2) / MAP_TILE_SIZE);
+    const minY = Math.floor((centerPx.y - rect.height / 2) / MAP_TILE_SIZE);
+    const maxY = Math.floor((centerPx.y + rect.height / 2) / MAP_TILE_SIZE);
+    const tileCount = 2 ** this.zoom;
+    const needed = new Set();
+
+    for (let x = minX; x <= maxX; x += 1) {
+      for (let y = minY; y <= maxY; y += 1) {
+        if (y < 0 || y >= tileCount) continue;
+        const wrappedX = ((x % tileCount) + tileCount) % tileCount;
+        const key = `${this.zoom}/${wrappedX}/${y}`;
+        needed.add(key);
+        let img = this.tiles.get(key);
+        if (!img) {
+          img = document.createElement('img');
+          img.className = 'offline-map-tile';
+          img.alt = '';
+          img.draggable = false;
+          img.src = mapTileUrl(this.zoom, wrappedX, y);
+          this.tiles.set(key, img);
+          this.layer.appendChild(img);
+        }
+        img.style.transform = `translate(${(x * MAP_TILE_SIZE - centerPx.x + rect.width / 2).toFixed(1)}px, ${(y * MAP_TILE_SIZE - centerPx.y + rect.height / 2).toFixed(1)}px)`;
+      }
+    }
+
+    for (const [key, img] of this.tiles.entries()) {
+      if (!needed.has(key)) {
+        img.remove();
+        this.tiles.delete(key);
+      }
+    }
+
+    this.trailSvg.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`);
+    this.positionMarker();
+    this.setTrail(_trailPoints);
+  }
+}
+
+class OfflineMarker {
+  constructor(ll, html) {
+    this.ll = ll;
+    this.el = document.createElement('div');
+    this.el.className = 'offline-map-marker rover-heading-icon';
+    this.el.innerHTML = html;
+  }
+
+  setLatLng(ll) {
+    this.ll = ll;
+    _map?.positionMarker();
+  }
+}
+
+class OfflinePolyline {
+  setLatLngs(points) {
+    _map?.setTrail(points);
+  }
+}
 
 function initMap() {
-  _map = L.map('gpsMap', { center: [38.5733, -109.5498], zoom: 15, attributionControl: false });
-  L.tileLayer('/map_tiles/usgs_topo/{z}/{x}/{y}.jpg', {
-    minZoom: 7,
-    maxZoom: 16,
-    maxNativeZoom: 15,
-    attribution: 'Offline USGS Topo',
-  }).addTo(_map);
-
-  const icon = L.divIcon({
-    className: 'rover-heading-icon',
-    html: `<div class="rover-heading-arrow" id="roverHeadingArrow"></div>`,
-    iconSize: [30, 30], iconAnchor: [15, 15],
-  });
-
-  _roverMarker = L.marker([38.5733, -109.5498], { icon }).addTo(_map);
-  _gpsTrail = L.polyline([], { color: '#ff37a8', weight: 2, opacity: 0.5 }).addTo(_map);
+  const container = document.getElementById('gpsMap');
+  _map = new OfflineTileMap(container, [38.5733, -109.5498], 15);
+  _roverMarker = new OfflineMarker([38.5733, -109.5498], `<div class="rover-heading-arrow" id="roverHeadingArrow"></div>`);
+  _gpsTrail = new OfflinePolyline();
+  _map.setMarker(_roverMarker);
 }
 
 function updateGPS(g) {

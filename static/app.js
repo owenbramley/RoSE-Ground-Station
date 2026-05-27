@@ -1058,8 +1058,10 @@ function waitForNativeFrame(id, seq, readyDelayMs = 2500) {
   const check = () => {
     if (!isCurrentCameraStart(id, seq) || !state.nativeCameras.has(id)) return;
     const img = document.getElementById(`camImg-${cssSafeId(id)}`);
-    if (img?.naturalWidth || img?.src) {
+    if (img?.naturalWidth) {
       setCameraStatus(id, 'live', 'Browser decode', '');
+    } else {
+      setCameraStatus(id, 'connecting', 'Waiting for first frame', 'The stream URL is open, but this browser has not decoded a camera frame yet.');
     }
   };
   clearCameraStatusTimer(id);

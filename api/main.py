@@ -13,6 +13,7 @@ import struct
 import threading
 import time
 import urllib.parse
+import urllib.request
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal, Optional
@@ -1107,6 +1108,23 @@ async def _mjpeg_generator(camera_id: str):
         await asyncio.sleep(idle_sleep)
 
 
+def _native_mjpeg_proxy_generator(rover_url: str):
+    req = urllib.request.Request(
+        rover_url,
+        headers={
+            "Accept": "multipart/x-mixed-replace,image/jpeg,*/*",
+            "Cache-Control": "no-cache",
+            "User-Agent": "RoSE-Ground-Station/1.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as res:
+        while True:
+            chunk = res.read(65536)
+            if not chunk:
+                break
+            yield chunk
+
+
 @app.get("/api/camera/{camera_id}")
 async def camera_stream(
     camera_id: str,
@@ -1233,7 +1251,38 @@ async def native_camera(camera_id: str, _token: str = Depends(require_auth)):
             stream = bridge.native_camera(camera_id)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
+    token_query = urllib.parse.urlencode({"token": _token}) if _token else ""
+    proxy_url = f"/api/camera/{urllib.parse.quote(str(camera_id), safe='')}/native.mjpg"
+    if token_query:
+        proxy_url = f"{proxy_url}?{token_query}"
+    direct_urls = [url for url in stream.get("urls", []) if url]
+    stream["direct_url"] = stream.get("url")
+    stream["direct_urls"] = direct_urls
+    stream["url"] = proxy_url
+    stream["urls"] = [proxy_url, *direct_urls]
+    stream["proxied"] = True
+    stream["transport"] = "proxied-mjpeg"
     return stream
+
+
+@app.get("/api/camera/{camera_id}/native.mjpg")
+async def native_camera_proxy(camera_id: str, _token: str = Depends(require_auth)):
+    try:
+        with _camera_control_lock:
+            stream = bridge.native_camera(camera_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    rover_url = stream.get("url")
+    if not rover_url:
+        raise HTTPException(status_code=503, detail="Rover camera service did not return a stream URL")
+    try:
+        return StreamingResponse(
+            _native_mjpeg_proxy_generator(rover_url),
+            media_type="multipart/x-mixed-replace",
+            headers={"Cache-Control": "no-store"},
+        )
+    except OSError as e:
+        raise HTTPException(status_code=503, detail=f"Rover MJPEG stream unavailable: {e}")
 
 
 @app.post("/api/camera/{camera_id}/stop")

@@ -75,7 +75,6 @@ class Config:
     jetson_ip_topic: str = "/jetson/ip"
     led_arduino_status_topic: str = "/led_arduino/status"
     led_arduino_360_camera_topic: str = "/led_arduino/camera_360/status"
-    led_arduino_360_capture_topic: str = "/led_arduino/camera_360/capture_cmd"
 
     # ROS2 topics — subsystem status
     arm_status_topic: str = "/arm/status"

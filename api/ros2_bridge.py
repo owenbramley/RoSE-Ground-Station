@@ -2,12 +2,12 @@
 ROS2 bridge — integrates with rclpy when available and reports unknown/offline
 state when live rover data is not present.
 """
-import random
 import threading
 import time
 import logging
 import base64
 import math
+import os
 import shutil
 import subprocess
 import urllib.error
@@ -106,8 +106,7 @@ try:
     from rclpy.node import Node
     from rclpy.executors import MultiThreadedExecutor
     from sensor_msgs.msg import Image, NavSatFix, BatteryState, Imu
-    from std_msgs.msg import Bool, Float32, String, UInt8MultiArray
-    from std_msgs.msg import UInt8
+    from std_msgs.msg import Bool, Float32, String, UInt8
     try:
         from gnc_interfaces.msg import SparkMotorTelemetry
         SPARK_TELEMETRY_AVAILABLE = True
@@ -165,11 +164,25 @@ class _DataStore:
             "heading_deg": None,
             "heading_source": None,
         }
+        self.payload_connected: bool = False
         self.arm_connected: bool = False
         self.drive_connected: bool = False
+        self.payload_arduino: dict = {
+            "connected": False,
+            "publisher_active": False,
+            "subscriber_active": False,
+            "temperature_c": None,
+            "moisture_pct": None,
+            "last_update_s": 0,
+        }
+        self.life_analysis: dict = {
+            "running": False,
+            "last_started_s": None,
+            "radar": None,
+        }
         self.camera_360_capture: dict = {
             "last_capture_s": None,
-            "last_command_bytes": [],
+            "last_servo_angles": [],
             "last_image_data_url": None,
         }
         self.subsystems: dict = {
@@ -435,7 +448,9 @@ class _DataStore:
             "mode": "live" if ROS2_AVAILABLE else "ros2_unavailable",
             "publishes": [
                 {"topic": config.estop_topic, "type": "std_msgs/Bool", "purpose": "Emergency stop state"},
-                {"topic": config.led_arduino_360_capture_topic, "type": "std_msgs/UInt8MultiArray", "purpose": "360 camera servo/capture byte command"},
+                {"topic": config.elevator_topic, "type": "std_msgs/Float32", "purpose": "Payload elevator step command"},
+                {"topic": config.carousel_topic, "type": "std_msgs/Float32", "purpose": "Payload carousel step command"},
+                {"topic": config.auger_topic, "type": "std_msgs/Float32", "purpose": "Payload auger speed command"},
             ],
             "subscribes": [
                 *[
@@ -872,8 +887,11 @@ if ROS2_AVAILABLE:
             self.create_subscription(BatteryState, config.battery_topic, self._battery_cb, 10)
             self.create_subscription(Float32, config.jetson_temp_topic, self._jetson_temp_cb, 5)
             self.create_subscription(String, config.jetson_ip_topic, self._jetson_ip_cb, 5)
+            self.create_subscription(Float32, config.payload_temperature_topic, self._payload_temperature_cb, 5)
+            self.create_subscription(Float32, config.payload_moisture_topic, self._payload_moisture_cb, 5)
             self.create_subscription(Bool, config.led_arduino_status_topic, self._led_arduino_status_cb, 5)
             self.create_subscription(Bool, config.led_arduino_360_camera_topic, self._camera_360_status_cb, 5)
+            self.create_subscription(Bool, config.payload_status_topic, self._payload_status_cb, 5)
             self.create_subscription(Bool, config.arm_status_topic, self._arm_status_cb, 5)
             self.create_subscription(Bool, config.drive_status_topic, self._drive_status_cb, 5)
             if SPARK_TELEMETRY_AVAILABLE:
@@ -890,9 +908,12 @@ if ROS2_AVAILABLE:
 
             # publishers
             self._estop_pub = self.create_publisher(Bool, config.estop_topic, 1)
-            self._camera360_capture_pub = self.create_publisher(UInt8MultiArray, config.led_arduino_360_capture_topic, 10)
+            self._elevator_pub = self.create_publisher(Float32, config.elevator_topic, 10)
+            self._carousel_pub = self.create_publisher(Float32, config.carousel_topic, 10)
+            self._auger_pub = self.create_publisher(Float32, config.auger_topic, 10)
             self._drive_clear_faults_pub = self.create_publisher(UInt8, config.drive_clear_faults_topic, 10)
             self._arm_clear_faults_pub = self.create_publisher(UInt8, config.arm_clear_faults_topic, 10)
+            self.create_timer(1.0, self._payload_graph_health_cb)
 
         def _make_cam_cb(self, cam_id: str):
             def cb(msg: Image):
@@ -1035,10 +1056,20 @@ if ROS2_AVAILABLE:
             store.add_log("WARN" if active else "INFO",
                           f"E-STOP {'ACTIVATED' if active else 'RESET'}", "estop")
 
-        def publish_camera360_capture(self, command_bytes: list[int]):
-            m = UInt8MultiArray()
-            m.data = [int(b) & 0xFF for b in command_bytes]
-            self._publish_redundant(self._camera360_capture_pub, m, "360 camera capture command")
+        def publish_elevator(self, mm: float):
+            m = Float32()
+            m.data = float(mm)
+            self._publish_redundant(self._elevator_pub, m, "Elevator command")
+
+        def publish_carousel(self, steps: float):
+            m = Float32()
+            m.data = float(steps)
+            self._publish_redundant(self._carousel_pub, m, "Carousel command")
+
+        def publish_auger(self, speed: float):
+            m = Float32()
+            m.data = float(speed)
+            self._publish_redundant(self._auger_pub, m, "Auger command")
 
         def publish_clear_motor_faults(self, group: str, device_id: int):
             m = UInt8()
@@ -1372,63 +1403,93 @@ class ROS2Bridge:
         )
         self._require_node().publish_clear_motor_faults(group, device_id)
 
-    def capture_360_image(self) -> dict:
-        command_bytes = [0xA5, 0x36, 0x00, 0x5A, random.randint(0, 255), 0xC3]
-        store.add_log(
-            "INFO",
-            "360 capture command bytes: " + " ".join(f"0x{b:02X}" for b in command_bytes),
-            "led_arduino",
-        )
-        self._require_node().publish_camera360_capture(command_bytes)
+    def start_life_analysis(self):
+        now = time.time()
+        with store._lock:
+            store.life_analysis["running"] = True
+            store.life_analysis["last_started_s"] = now
+        store.add_log("INFO", "Payload life analysis start requested", "payload")
 
-        frames = []
-        for camera in store.get_cameras():
-            data = store.get_camera_frame(str(camera.get("id")))
-            if not data:
-                continue
-            arr = np.frombuffer(data, dtype=np.uint8)
-            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if frame is not None:
-                frames.append(frame)
+    def set_life_analysis_radar(self, radar: dict):
+        with store._lock:
+            store.life_analysis["radar"] = dict(radar)
+            store.life_analysis["running"] = False
+        store.add_log("INFO", "Payload life analysis radar output received", "payload")
 
-        if not frames:
-            raise RuntimeError("No camera frames available for 360 capture")
+    def capture_360_image(self, camera_id: Optional[str] = None) -> dict:
+        camera_id = str(camera_id or "").strip()
+        if config.camera_source == "udp":
+            cameras = store.get_cameras() or self.refresh_cameras()
+            if not camera_id:
+                camera_id = str(next((c.get("id") for c in cameras if c.get("id")), "") or "")
+            if not camera_id:
+                raise RuntimeError("No rover camera available for 360 capture")
+            was_streaming = any(str(c.get("id")) == camera_id and c.get("streaming") for c in cameras)
 
-        target_h = min(frame.shape[0] for frame in frames)
-        resized = []
-        for frame in frames:
-            scale = target_h / frame.shape[0]
-            target_w = max(1, int(frame.shape[1] * scale))
-            resized.append(cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA))
+            payload = {
+                "max_width": config.rover_camera_still_max_width,
+                "max_height": config.rover_camera_still_max_height,
+            }
+            try:
+                res = _rover_request(
+                    "POST",
+                    f"/cameras/{urllib.parse.quote(camera_id, safe='')}/panorama",
+                    payload,
+                    timeout=float(os.environ.get("GS_CAMERA360_TIMEOUT_S", "260")),
+                )
+            finally:
+                if was_streaming and _last_camera_client_ip:
+                    try:
+                        self.start_camera(camera_id, _last_camera_client_ip)
+                    except RuntimeError as exc:
+                        store.add_log("WARN", f"Could not resume camera {camera_id} after panorama: {exc}", "camera")
+            result = res.get("panorama", {})
+            if not result.get("image_data_url"):
+                raise RuntimeError("Rover panorama endpoint did not return an image")
+            source_frames = int(result.get("frame_count") or len(result.get("steps") or []))
+        else:
+            frames = []
+            for camera in store.get_cameras():
+                if camera_id and str(camera.get("id")) != camera_id:
+                    continue
+                data = store.get_camera_frame(str(camera.get("id")))
+                if not data:
+                    continue
+                arr = np.frombuffer(data, dtype=np.uint8)
+                frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    frames.append(frame)
 
-        stitched = cv2.hconcat(resized)
-        cv2.putText(
-            stitched,
-            datetime.now().strftime("360 CAPTURE %Y-%m-%d %H:%M:%S"),
-            (14, 34),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (230, 230, 230),
-            2,
-        )
-        ok, buf = cv2.imencode(".jpg", stitched, [cv2.IMWRITE_JPEG_QUALITY, config.jpeg_quality])
-        if not ok:
-            raise RuntimeError("Failed to encode stitched 360 image")
+            if not frames:
+                raise RuntimeError("No camera frames available for 360 capture")
 
-        image_data_url = "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
-        result = {
-            "captured_at": datetime.now(timezone.utc).isoformat(),
-            "command_bytes": command_bytes,
-            "image_data_url": image_data_url,
-            "source_frames": len(frames),
-        }
+            target_h = min(frame.shape[0] for frame in frames)
+            resized = []
+            for frame in frames:
+                scale = target_h / frame.shape[0]
+                target_w = max(1, int(frame.shape[1] * scale))
+                resized.append(cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA))
+
+            stitched = cv2.hconcat(resized)
+            ok, buf = cv2.imencode(".jpg", stitched, [cv2.IMWRITE_JPEG_QUALITY, config.jpeg_quality])
+            if not ok:
+                raise RuntimeError("Failed to encode stitched 360 image")
+
+            result = {
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "camera_id": camera_id,
+                "image_data_url": "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode("ascii"),
+                "source_frames": len(frames),
+            }
+            source_frames = len(frames)
+
         with store._lock:
             store.camera_360_capture.update({
                 "last_capture_s": time.time(),
-                "last_command_bytes": command_bytes,
-                "last_image_data_url": image_data_url,
+                "last_servo_angles": [int(step.get("servo_angle", 0)) for step in result.get("steps", [])],
+                "last_image_data_url": result.get("image_data_url"),
             })
-        store.add_log("INFO", f"360 image stitched from {len(frames)} camera frames", "camera360")
+        store.add_log("INFO", f"360 image stitched from {source_frames} frame(s)", "camera360")
         return result
 
 

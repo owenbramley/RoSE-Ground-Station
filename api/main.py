@@ -1285,7 +1285,7 @@ async def native_camera(camera_id: str, _token: str = Depends(require_auth)):
     stream["direct_urls"] = direct_urls
     stream["proxy_url"] = proxy_url
     stream["url"] = stream["direct_url"]
-    stream["urls"] = direct_urls
+    stream["urls"] = [*direct_urls, proxy_url]
     stream["proxied"] = False
     stream["transport"] = "direct-mjpeg"
     return stream
@@ -1477,6 +1477,10 @@ class DashboardTimerAction(BaseModel):
     action: Literal["start", "pause", "resume", "stop", "reset", "lap"]
 
 
+class Camera360CaptureRequest(BaseModel):
+    camera_id: Optional[str] = None
+
+
 @app.get("/api/dashboard/timer")
 async def get_dashboard_timer(_t: str = Depends(require_auth)):
     return {"timer": dashboard_timer.snapshot()}
@@ -1512,9 +1516,10 @@ async def subsystem_overview(_t: str = Depends(require_auth)):
 
 
 @app.post("/api/camera360/capture")
-async def capture_360_image(_t: str = Depends(require_auth)):
+async def capture_360_image(req: Optional[Camera360CaptureRequest] = None, _t: str = Depends(require_auth)):
     try:
-        return {"ok": True, "capture": bridge.capture_360_image()}
+        req = req or Camera360CaptureRequest()
+        return {"ok": True, "capture": bridge.capture_360_image(req.camera_id)}
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 

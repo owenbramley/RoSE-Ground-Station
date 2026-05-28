@@ -416,27 +416,44 @@ function activateTab(name) {
 
 let _telemWS = null;
 let _telemRetry = 1000;
+let _telemRetryTimer = null;
+let _telemPollTimer = null;
 
 function connectTelemetryWS() {
+  if (_telemRetryTimer) {
+    clearTimeout(_telemRetryTimer);
+    _telemRetryTimer = null;
+  }
   const url = withToken(`${WS_ORIGIN}/ws/telemetry`);
-  _telemWS = new WebSocket(url);
+  const ws = new WebSocket(url);
+  _telemWS = ws;
+  setTimeout(() => {
+    if (_telemWS === ws && ws.readyState !== WebSocket.OPEN) {
+      startTelemetryPolling();
+    }
+  }, 3000);
 
-  _telemWS.addEventListener('open', () => {
+  ws.addEventListener('open', () => {
+    if (_telemWS !== ws) return;
     _telemRetry = 1000;
+    stopTelemetryPolling();
     setApiStatus(true);
   });
 
-  _telemWS.addEventListener('message', e => {
+  ws.addEventListener('message', e => {
+    if (_telemWS !== ws) return;
     try { handleTelemetryMsg(JSON.parse(e.data)); } catch (_) {}
   });
 
-  _telemWS.addEventListener('close', e => {
+  ws.addEventListener('close', e => {
+    if (_telemWS !== ws) return;
     setApiStatus(false);
-    setTimeout(connectTelemetryWS, Math.min(_telemRetry, 30000));
+    startTelemetryPolling();
+    _telemRetryTimer = setTimeout(connectTelemetryWS, Math.min(_telemRetry, 30000));
     _telemRetry = Math.min(_telemRetry * 1.5, 30000);
   });
 
-  _telemWS.addEventListener('error', () => _telemWS.close());
+  ws.addEventListener('error', () => ws.close());
 }
 
 function setApiStatus(online) {
@@ -444,6 +461,27 @@ function setApiStatus(online) {
   const label = document.getElementById('apiLabel');
   dot.className     = `status-dot ${online ? 'dot-green' : 'dot-red'}`;
   label.textContent = online ? 'API Online' : 'Reconnecting…';
+}
+
+function startTelemetryPolling() {
+  if (_telemPollTimer) return;
+  const poll = async () => {
+    try {
+      const msg = await apiFetch('/api/telemetry');
+      handleTelemetryMsg(msg);
+      setApiStatus(true);
+    } catch (_) {
+      setApiStatus(false);
+    }
+  };
+  poll();
+  _telemPollTimer = setInterval(poll, 2000);
+}
+
+function stopTelemetryPolling() {
+  if (!_telemPollTimer) return;
+  clearInterval(_telemPollTimer);
+  _telemPollTimer = null;
 }
 
 function handleTelemetryMsg(msg) {

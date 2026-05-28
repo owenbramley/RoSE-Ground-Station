@@ -961,23 +961,26 @@ def shutil_which(cmd: str) -> Optional[str]:
 # Background broadcast tasks
 # ---------------------------------------------------------------------------
 
+def _telemetry_payload() -> dict:
+    return {
+        "type": "telemetry",
+        "telemetry": bridge.get_telemetry(),
+        "gnss": bridge.get_gnss(),
+        "arm_connected": bridge.is_arm_connected(),
+        "drive_connected": bridge.is_drive_connected(),
+        "subsystems": bridge.get_subsystems(),
+        "comms": bridge.get_comms(),
+        "led_controller": bridge.get_led_controller(),
+        "motor_telemetry": bridge.get_motor_telemetry(),
+        "dashboard_timer": dashboard_timer.snapshot(),
+        "ts": time.time(),
+    }
+
+
 async def _telemetry_broadcast():
     while True:
         try:
-            payload = {
-                "type": "telemetry",
-                "telemetry": bridge.get_telemetry(),
-                "gnss": bridge.get_gnss(),
-                "arm_connected": bridge.is_arm_connected(),
-                "drive_connected": bridge.is_drive_connected(),
-                "subsystems": bridge.get_subsystems(),
-                "comms": bridge.get_comms(),
-                "led_controller": bridge.get_led_controller(),
-                "motor_telemetry": bridge.get_motor_telemetry(),
-                "dashboard_timer": dashboard_timer.snapshot(),
-                "ts": time.time(),
-            }
-            await telemetry_mgr.broadcast(payload)
+            await telemetry_mgr.broadcast(_telemetry_payload())
         except Exception as e:
             logger.error(f"Telemetry broadcast error: {e}")
         await asyncio.sleep(1.0)
@@ -1450,6 +1453,11 @@ async def system_overview(_t: str = Depends(require_auth)):
     system["led_controller"] = bridge.get_led_controller()
     system["motor_telemetry"] = bridge.get_motor_telemetry()
     return system
+
+
+@app.get("/api/telemetry")
+async def telemetry_snapshot(_t: str = Depends(require_auth)):
+    return _telemetry_payload()
 
 
 @app.get("/api/gps")

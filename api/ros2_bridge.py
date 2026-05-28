@@ -26,6 +26,7 @@ logger = logging.getLogger("ros2_bridge")
 
 THERMAL_ROOT = Path("/sys/class/thermal")
 TELEMETRY_STALE_S = 5.0
+SENSOR_ONLINE_TIMEOUT_S = 5.0
 
 
 def _read_temperature_c(path: Path) -> Optional[float]:
@@ -216,6 +217,8 @@ class _DataStore:
             "rover_current_ip": None,
             "rover_ips": [],
             "imu_online": False,
+            "imu_last_update_s": None,
+            "imu_updated_at": None,
             "gnss_module_online": False,
             "uptime_s": 0,
         }
@@ -322,7 +325,10 @@ class _DataStore:
         with self._lock:
             g = dict(self.gnss)
             last_update = g.get("last_update_s")
-            connected = isinstance(last_update, (int, float)) and (time.time() - float(last_update) <= 5.0)
+            connected = (
+                isinstance(last_update, (int, float))
+                and time.time() - float(last_update) <= SENSOR_ONLINE_TIMEOUT_S
+            )
             g["connected"] = connected
             if not connected:
                 g.update({"valid": False, "fix": "NO_DATA", "lat": None, "lon": None})
@@ -333,6 +339,17 @@ class _DataStore:
     def get_system(self) -> dict:
         with self._lock:
             s = dict(self.system)
+            now = time.time()
+            imu_last_update = s.get("imu_last_update_s")
+            gnss_last_update = self.gnss.get("last_update_s")
+            s["imu_online"] = (
+                isinstance(imu_last_update, (int, float))
+                and now - float(imu_last_update) <= SENSOR_ONLINE_TIMEOUT_S
+            )
+            s["gnss_module_online"] = (
+                isinstance(gnss_last_update, (int, float))
+                and now - float(gnss_last_update) <= SENSOR_ONLINE_TIMEOUT_S
+            )
             s["uptime_s"] = int(time.time() - self._start_time)
             return s
 
@@ -940,6 +957,8 @@ if ROS2_AVAILABLE:
                 with store._lock:
                     store.gnss["heading_deg"] = heading
                     store.gnss["heading_source"] = topic
+                    store.system["imu_last_update_s"] = time.time()
+                    store.system["imu_updated_at"] = datetime.now(timezone.utc).isoformat()
                     store.system["imu_online"] = True
             return cb
 

@@ -178,13 +178,15 @@ function escHtml(s) {
 
 async function apiFetch(path, options = {}) {
   const ctrl = new AbortController();
-  const timeout = setTimeout(() => ctrl.abort(), 8000);
+  const timeoutMs = Number(options.timeoutMs || 8000);
+  const timeout = setTimeout(() => ctrl.abort(), timeoutMs);
   const method = (options.method || 'GET').toUpperCase();
   try {
     const headers = { ...(options.headers || {}) };
     const token = getToken();
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    const res = await fetch(path, { signal: ctrl.signal, ...options, headers });
+    const { timeoutMs: _timeoutMs, ...fetchOptions } = options;
+    const res = await fetch(path, { signal: ctrl.signal, ...fetchOptions, headers });
     clearTimeout(timeout);
 
     if (!res.ok) {
@@ -810,20 +812,28 @@ async function capture360Image() {
   const img = document.getElementById('capture360Img');
   const placeholder = document.getElementById('capture360Placeholder');
   modal.classList.remove('hidden');
-  status.textContent = 'Sending servo command to LED Arduino and stitching camera frames...';
-  command.textContent = 'Command bytes: pending';
+  const camera = state.cameras.find(cam => state.visibleCameras.has(String(cam.id))) || state.cameras[0];
+  const cameraId = camera ? String(camera.id) : '';
+  status.textContent = cameraId ? `Rotating ${cameraName(cameraId)} and capturing panorama...` : 'No camera selected for panorama capture';
+  command.textContent = 'Servo angles: pending';
   img.classList.add('hidden');
   placeholder.classList.remove('hidden');
 
   try {
-    const res = await apiFetch('/api/camera360/capture', { method: 'POST' });
+    if (!cameraId) throw new Error('No rover camera is available');
+    const res = await apiFetch('/api/camera360/capture', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ camera_id: cameraId }),
+      timeoutMs: 270000,
+    });
     const capture = res.capture || {};
-    const bytes = (capture.command_bytes || []).map(b => `0x${Number(b).toString(16).padStart(2, '0').toUpperCase()}`).join(' ');
-    command.textContent = `Command bytes: ${bytes || '--'}`;
+    const angles = (capture.steps || []).map(step => `${Number(step.servo_angle || 0)}°`).join(' ');
+    command.textContent = `Servo angles: ${angles || '--'}`;
     img.src = capture.image_data_url || '';
     img.classList.toggle('hidden', !capture.image_data_url);
     placeholder.classList.toggle('hidden', !!capture.image_data_url);
-    status.textContent = `Captured ${capture.source_frames || 0} frames and stitched on Jetson`;
+    status.textContent = `Captured ${capture.frame_count || capture.source_frames || 0} frames and stitched on rover`;
   } catch (err) {
     status.textContent = `Capture failed: ${err.message}`;
     showToast('error', '360 Capture Failed', err.message);

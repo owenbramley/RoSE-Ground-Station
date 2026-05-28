@@ -77,7 +77,6 @@ class Config:
     payload_moisture_topic: str = "/payload/arduino/moisture"
     led_arduino_status_topic: str = "/led_arduino/status"
     led_arduino_360_camera_topic: str = "/led_arduino/camera_360/status"
-    led_arduino_360_capture_topic: str = "/led_arduino/camera_360/capture_cmd"
 
     # ROS2 topics — subsystem status
     payload_status_topic: str = "/payload/status"

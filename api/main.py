@@ -1039,6 +1039,14 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def no_cache_ui_shell(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path in {"/", "/index.html", "/app.js", "/style.css"}:
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Auth — public (no token required)
 # ---------------------------------------------------------------------------

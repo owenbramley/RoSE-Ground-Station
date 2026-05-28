@@ -507,6 +507,7 @@ NETWORK_RADIOS = {
     "m2": {"label": "M2 Rocket", "band": "2.4 GHz"},
     "m900": {"label": "M900 Rocket", "band": "900 MHz"},
 }
+LEGACY_NETWORK_CONFIG_PATH = "data/network_config.json"
 
 SNMP_OIDS = {
     "signal_dbm": [
@@ -536,29 +537,43 @@ class NetworkConfig(BaseModel):
 
 
 def _network_config_path() -> Path:
-    path = Path(config.network_config_path)
+    return _repo_relative_path(config.network_config_path)
+
+
+def _repo_relative_path(path_value: str) -> Path:
+    path = Path(path_value)
     if not path.is_absolute():
         path = Path(__file__).parent.parent / path
     return path
 
 
 def _load_network_config() -> NetworkConfig:
-    path = _network_config_path()
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return NetworkConfig()
-    return NetworkConfig(
-        m2_ip=str(raw.get("m2_ip") or "").strip(),
-        m900_ip=str(raw.get("m900_ip") or "").strip(),
-    )
+    paths = [_network_config_path()]
+    legacy_path = _repo_relative_path(LEGACY_NETWORK_CONFIG_PATH)
+    if legacy_path not in paths:
+        paths.append(legacy_path)
+
+    for path in paths:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, json.JSONDecodeError):
+            continue
+        return NetworkConfig(
+            m2_ip=str(raw.get("m2_ip") or "").strip(),
+            m900_ip=str(raw.get("m900_ip") or "").strip(),
+        )
+    return NetworkConfig()
 
 
 def _save_network_config(req: NetworkConfig) -> NetworkConfig:
     clean = NetworkConfig(m2_ip=req.m2_ip.strip(), m900_ip=req.m900_ip.strip())
     path = _network_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(clean.dict(), indent=2) + "\n", encoding="utf-8")
+    tmp_path = path.with_suffix(f"{path.suffix}.tmp")
+    tmp_path.write_text(json.dumps(clean.dict(), indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
     return clean
 
 
@@ -953,13 +968,10 @@ async def _telemetry_broadcast():
                 "type": "telemetry",
                 "telemetry": bridge.get_telemetry(),
                 "gnss": bridge.get_gnss(),
-                "payload_connected": bridge.is_payload_connected(),
                 "arm_connected": bridge.is_arm_connected(),
                 "drive_connected": bridge.is_drive_connected(),
                 "subsystems": bridge.get_subsystems(),
                 "comms": bridge.get_comms(),
-                "payload_arduino": bridge.get_payload_arduino(),
-                "life_analysis": bridge.get_life_analysis(),
                 "led_controller": bridge.get_led_controller(),
                 "motor_telemetry": bridge.get_motor_telemetry(),
                 "dashboard_timer": dashboard_timer.snapshot(),
@@ -1256,12 +1268,15 @@ async def native_camera(camera_id: str, _token: str = Depends(require_auth)):
     if token_query:
         proxy_url = f"{proxy_url}?{token_query}"
     direct_urls = [url for url in stream.get("urls", []) if url]
-    stream["direct_url"] = stream.get("url")
+    if stream.get("url") and stream.get("url") not in direct_urls:
+        direct_urls.insert(0, stream["url"])
+    stream["direct_url"] = direct_urls[0] if direct_urls else stream.get("url")
     stream["direct_urls"] = direct_urls
-    stream["url"] = proxy_url
-    stream["urls"] = [proxy_url, *direct_urls]
-    stream["proxied"] = True
-    stream["transport"] = "proxied-mjpeg"
+    stream["proxy_url"] = proxy_url
+    stream["url"] = stream["direct_url"]
+    stream["urls"] = direct_urls
+    stream["proxied"] = False
+    stream["transport"] = "direct-mjpeg"
     return stream
 
 
@@ -1290,6 +1305,13 @@ async def stop_camera(camera_id: str, _token: str = Depends(require_auth)):
     with _camera_control_lock:
         camera = bridge.stop_camera(camera_id)
     return {"camera": _apply_camera_labels([camera])[0]}
+
+
+@app.post("/api/camera/{camera_id}/reset")
+async def reset_camera(camera_id: str, _token: str = Depends(require_auth)):
+    with _camera_control_lock:
+        camera = bridge.reset_camera(camera_id)
+    return {"ok": True, "camera": _apply_camera_labels([camera])[0]}
 
 
 @app.post("/api/camera/{camera_id}/still")
@@ -1399,7 +1421,12 @@ async def get_network_config(_t: str = Depends(require_auth)):
 @app.put("/api/network/config")
 async def update_network_config(req: NetworkConfig, _t: str = Depends(require_auth)):
     clean = NetworkConfig(m2_ip=_safe_host(req.m2_ip), m900_ip=_safe_host(req.m900_ip))
-    saved = _save_network_config(clean)
+    try:
+        saved = _save_network_config(clean)
+    except OSError as e:
+        path = _network_config_path()
+        bridge.add_log("ERROR", f"Could not save Network Rocket IPs to {path}: {e}", "network")
+        raise HTTPException(status_code=500, detail=f"Could not save rocket IPs to {path}: {e}") from e
     bridge.add_log("INFO", "Network Rocket IPs updated", "network")
     return {"ok": True, "config": saved.dict()}
 
@@ -1420,8 +1447,6 @@ async def system_overview(_t: str = Depends(require_auth)):
     system["urls"] = [f"http://{ip}:{config.port}" for ip in ips]
     system["subsystems"] = bridge.get_subsystems()
     system["comms"] = bridge.get_comms()
-    system["payload_arduino"] = bridge.get_payload_arduino()
-    system["life_analysis"] = bridge.get_life_analysis()
     system["led_controller"] = bridge.get_led_controller()
     system["motor_telemetry"] = bridge.get_motor_telemetry()
     return system
@@ -1495,85 +1520,6 @@ async def list_files(path: Optional[str] = Query(None), _t: str = Depends(requir
             content={"ok": False, "error": "no_storage", "detail": "No external storage device detected."},
         )
     return storage
-
-
-@app.get("/api/payload/status")
-async def payload_status(_t: str = Depends(require_auth)):
-    return {"connected": bridge.is_payload_connected(), "arduino": bridge.get_payload_arduino()}
-
-
-class ElevatorCommand(BaseModel):
-    direction: str = Field(..., pattern="^(up|down)$")
-    steps: int = Field(..., gt=0, le=100000)
-
-
-@app.post("/api/payload/elevator")
-async def payload_elevator(cmd: ElevatorCommand, _t: str = Depends(require_auth)):
-    if not bridge.is_payload_connected():
-        raise HTTPException(status_code=503, detail="Payload subsystem not connected")
-    steps = cmd.steps if cmd.direction == "up" else -cmd.steps
-    try:
-        bridge.send_elevator(steps)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    return {"ok": True, "direction": cmd.direction, "steps": abs(steps)}
-
-
-class CarouselCommand(BaseModel):
-    direction: str = Field(..., pattern="^(cw|ccw)$")
-    steps: int = Field(..., gt=0, le=10000)
-
-
-@app.post("/api/payload/carousel")
-async def payload_carousel(cmd: CarouselCommand, _t: str = Depends(require_auth)):
-    if not bridge.is_payload_connected():
-        raise HTTPException(status_code=503, detail="Payload subsystem not connected")
-    steps = cmd.steps if cmd.direction == "cw" else -cmd.steps
-    try:
-        bridge.send_carousel(steps)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    return {"ok": True, "direction": cmd.direction, "steps": abs(steps)}
-
-
-class AugerCommand(BaseModel):
-    speed: float = Field(..., ge=0, le=100)
-    enabled: bool
-
-
-@app.post("/api/payload/auger")
-async def payload_auger(cmd: AugerCommand, _t: str = Depends(require_auth)):
-    if not bridge.is_payload_connected():
-        raise HTTPException(status_code=503, detail="Payload subsystem not connected")
-    try:
-        bridge.send_auger(cmd.speed, cmd.enabled)
-    except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    return {"ok": True, "speed": cmd.speed, "enabled": cmd.enabled}
-
-
-class LifeRadarResult(BaseModel):
-    labels: list[str] = Field(default_factory=list)
-    values: list[float] = Field(default_factory=list)
-    image_data_url: Optional[str] = None
-    summary: Optional[str] = None
-
-
-@app.post("/api/payload/life-analysis/start")
-async def start_life_analysis(_t: str = Depends(require_auth)):
-    if not bridge.is_payload_connected():
-        raise HTTPException(status_code=503, detail="Payload subsystem not connected")
-    bridge.start_life_analysis()
-    return {"ok": True, "life_analysis": bridge.get_life_analysis()}
-
-
-@app.post("/api/payload/life-analysis/radar")
-async def life_analysis_radar(result: LifeRadarResult, _t: str = Depends(require_auth)):
-    if result.labels and len(result.labels) != len(result.values):
-        raise HTTPException(status_code=400, detail="labels and values must be the same length")
-    radar = result.dict()
-    bridge.set_life_analysis_radar(radar)
-    return {"ok": True, "life_analysis": bridge.get_life_analysis()}
 
 
 @app.get("/api/arm/status")

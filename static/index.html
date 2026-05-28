@@ -25,7 +25,6 @@
       <button class="tab-btn" data-tab="files">Files</button>
       <button class="tab-btn" data-tab="system">System Overview</button>
       <button class="tab-btn" data-tab="network">Network</button>
-      <button class="tab-btn" data-tab="payload">Payload</button>
     </nav>
   </div>
   <div class="header-right">
@@ -214,7 +213,7 @@
             </button>
             <button class="mission-mode-btn" data-mission-mode="autonav">
               <span class="mission-mode-title">Autonav</span>
-              <span class="mission-mode-meta">No arm or payload</span>
+              <span class="mission-mode-meta">Dashboard + Cameras</span>
             </button>
           </div>
         </section>
@@ -353,11 +352,6 @@
       <section class="section sys-card">
         <div class="section-header"><span>System Health</span></div>
         <div class="sys-status-row">
-          <div class="sys-status-item" id="sysPayloadConn">
-            <span class="status-dot dot-red"></span>
-            <span class="sys-item-label">Payload</span>
-            <span class="sys-item-val" id="sysPayloadVal">Disconnected</span>
-          </div>
           <div class="sys-status-item" id="sysArmConn">
             <span class="status-dot dot-red"></span>
             <span class="sys-item-label">Arm</span>
@@ -591,142 +585,6 @@
       </div>
     </section>
   </div><!-- /tab-network -->
-
-
-  <!-- ── PAYLOAD ──────────────────────────────────────────────────── -->
-  <div class="tab-content" id="tab-payload">
-    <div class="subsys-header" id="payloadHeader">
-      <span class="status-dot" id="payloadDot"></span>
-      <span id="payloadStatusLabel">Checking…</span>
-    </div>
-    <div class="subsys-body" id="payloadBody">
-      <section class="section payload-status-section">
-        <div class="section-header"><span>Payload Arduino ROS Link</span></div>
-        <div class="payload-status-grid">
-          <div class="payload-status-card">
-            <span class="status-dot dot-yellow" id="payloadArduinoPubDot"></span>
-            <div>
-              <div class="payload-status-label">Arduino Publisher</div>
-              <div class="payload-status-val" id="payloadArduinoPubVal">Checking...</div>
-            </div>
-          </div>
-          <div class="payload-status-card">
-            <span class="status-dot dot-yellow" id="payloadArduinoSubDot"></span>
-            <div>
-              <div class="payload-status-label">Arduino Subscriber</div>
-              <div class="payload-status-val" id="payloadArduinoSubVal">Checking...</div>
-            </div>
-          </div>
-          <div class="payload-status-card">
-            <span class="status-dot dot-yellow" id="payloadArduinoConnDot"></span>
-            <div>
-              <div class="payload-status-label">Arduino Link</div>
-              <div class="payload-status-val" id="payloadArduinoConnVal">Checking...</div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="section payload-sensor-section">
-        <div class="section-header"><span>Arduino Sensor Readings</span></div>
-        <div class="payload-sensor-grid">
-          <div class="payload-sensor-card">
-            <div class="telem-label">Current Temperature</div>
-            <div class="telem-value-sm"><span id="payloadTempVal">--</span><span class="telem-unit">°C</span></div>
-          </div>
-          <div class="payload-sensor-card">
-            <div class="telem-label">Current Moisture</div>
-            <div class="telem-value-sm"><span id="payloadMoistureVal">--</span><span class="telem-unit">%</span></div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Elevator Steppers -->
-      <section class="section ctrl-section">
-        <div class="section-header"><span>Elevator Stepper</span></div>
-        <div class="ctrl-body">
-          <div class="ctrl-increment-row">
-            <label class="ctrl-label">Steps</label>
-            <input type="number" id="elevatorSteps" class="ctrl-input" value="100" min="1" max="100000" step="1" />
-            <span class="ctrl-unit">steps</span>
-          </div>
-          <div class="ctrl-arrows">
-            <button class="ctrl-arrow-btn ctrl-up" id="elevatorUp">▲<br/><span>UP</span></button>
-            <button class="ctrl-arrow-btn ctrl-down" id="elevatorDown">▼<br/><span>DOWN</span></button>
-          </div>
-          <div class="ctrl-feedback" id="elevatorFeedback"></div>
-        </div>
-      </section>
-
-      <!-- Carousel -->
-      <section class="section ctrl-section">
-        <div class="section-header"><span>Carousel</span></div>
-        <div class="ctrl-body">
-          <div class="ctrl-increment-row">
-            <label class="ctrl-label">Step Size</label>
-            <input type="number" id="carouselSteps" class="ctrl-input" value="10" min="1" max="10000" step="1" />
-            <span class="ctrl-unit">steps</span>
-          </div>
-          <div class="ctrl-arrows ctrl-rotate">
-            <button class="ctrl-arrow-btn ctrl-ccw" id="carouselCCW">↺<br/><span>CCW</span></button>
-            <button class="ctrl-arrow-btn ctrl-cw"  id="carouselCW">↻<br/><span>CW</span></button>
-          </div>
-          <div class="ctrl-feedback" id="carouselFeedback"></div>
-        </div>
-      </section>
-
-      <!-- Auger -->
-      <section class="section ctrl-section">
-        <div class="section-header"><span>Auger</span></div>
-        <div class="ctrl-body auger-body">
-          <div class="auger-speed-row">
-            <label class="ctrl-label">Speed</label>
-            <input type="range" id="augerSlider" class="auger-slider" min="0" max="100" step="1" value="0" />
-            <span class="auger-pct" id="augerPct">0%</span>
-          </div>
-          <button class="auger-toggle" id="augerToggle" data-on="false">
-            <span id="augerToggleLabel">OFF</span>
-          </button>
-          <div class="ctrl-feedback" id="augerFeedback"></div>
-        </div>
-      </section>
-
-      <section class="section byte-workspace-section">
-        <div class="section-header"><span>Stepper Byte Command Workspace</span></div>
-        <div class="byte-workspace-body">
-          <div class="byte-columns">
-            <label class="byte-field">
-              <span>Elevator byte sequence</span>
-              <textarea id="elevatorByteSequence" spellcheck="false" placeholder="Add custom elevator command bytes here, e.g. 0xAA 0x01 ..."></textarea>
-            </label>
-            <label class="byte-field">
-              <span>Carousel byte sequence</span>
-              <textarea id="carouselByteSequence" spellcheck="false" placeholder="Add custom carousel command bytes here, e.g. 0xAA 0x02 ..."></textarea>
-            </label>
-          </div>
-        </div>
-      </section>
-
-      <section class="section life-analysis-section">
-        <div class="section-header"><span>Payload Life Analysis</span></div>
-        <div class="life-analysis-body">
-          <div class="life-analysis-actions">
-            <button class="btn-primary" id="startLifeAnalysisBtn">Start Analysis</button>
-            <label class="btn-secondary file-btn">
-              Load Radar Graph
-              <input type="file" id="lifeRadarFile" accept="image/*" />
-            </label>
-          </div>
-          <div class="life-analysis-status" id="lifeAnalysisStatus">Idle</div>
-          <div class="radar-output" id="radarOutput">
-            <span>No radar graph loaded</span>
-            <img id="radarGraphImg" class="hidden" alt="Payload life analysis radar graph" />
-          </div>
-        </div>
-      </section>
-
-    </div><!-- /payloadBody -->
-  </div><!-- /tab-payload -->
 
 </main><!-- /main -->
 

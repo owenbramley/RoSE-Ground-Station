@@ -25,6 +25,7 @@ from .config import config
 logger = logging.getLogger("ros2_bridge")
 
 THERMAL_ROOT = Path("/sys/class/thermal")
+TELEMETRY_STALE_S = 5.0
 
 
 def _read_temperature_c(path: Path) -> Optional[float]:
@@ -144,6 +145,12 @@ class _DataStore:
             "voltage": None,
             "temperature": None,
         }
+        self.telemetry_updated_at: dict[str, Optional[float]] = {
+            "soc": None,
+            "current": None,
+            "voltage": None,
+            "temperature": None,
+        }
         self.gnss: dict = {
             "lat": None,
             "lon": None,
@@ -157,39 +164,14 @@ class _DataStore:
             "heading_deg": None,
             "heading_source": None,
         }
-        self.payload_connected: bool = False
         self.arm_connected: bool = False
         self.drive_connected: bool = False
-        self.payload_arduino: dict = {
-            "connected": False,
-            "publisher_active": False,
-            "subscriber_active": False,
-            "temperature_c": None,
-            "moisture_pct": None,
-            "last_update_s": 0,
-        }
-        self.life_analysis: dict = {
-            "running": False,
-            "last_started_s": None,
-            "radar": None,
-        }
         self.camera_360_capture: dict = {
             "last_capture_s": None,
             "last_command_bytes": [],
             "last_image_data_url": None,
         }
         self.subsystems: dict = {
-            "payload": {
-                "label": "Payload",
-                "status": "critical",
-                "connected": False,
-                "summary": "Awaiting ROS2 status",
-                "metrics": [
-                    {"label": "Arduino Pub", "value": "No data"},
-                    {"label": "Arduino Sub", "value": "No data"},
-                    {"label": "Moisture", "value": "--"},
-                ],
-            },
             "arm": {
                 "label": "Arm",
                 "status": "critical",
@@ -313,7 +295,28 @@ class _DataStore:
 
     def get_telemetry(self) -> dict:
         with self._lock:
-            return dict(self.telemetry)
+            telemetry = dict(self.telemetry)
+            now = time.time()
+            meta = {}
+            for key, updated_at in self.telemetry_updated_at.items():
+                age_s = (now - float(updated_at)) if isinstance(updated_at, (int, float)) else None
+                meta[key] = {
+                    "updated_at": datetime.fromtimestamp(updated_at, timezone.utc).isoformat()
+                    if isinstance(updated_at, (int, float)) else None,
+                    "age_s": round(age_s, 1) if age_s is not None else None,
+                    "stale": age_s is None or age_s > TELEMETRY_STALE_S,
+                }
+            telemetry["_meta"] = meta
+            return telemetry
+
+    def set_telemetry_field(self, key: str, value):
+        if key not in self.telemetry:
+            return
+        if isinstance(value, (int, float)) and not math.isfinite(float(value)):
+            return
+        with self._lock:
+            self.telemetry[key] = value
+            self.telemetry_updated_at[key] = time.time()
 
     def get_gnss(self) -> dict:
         with self._lock:
@@ -332,10 +335,6 @@ class _DataStore:
             s = dict(self.system)
             s["uptime_s"] = int(time.time() - self._start_time)
             return s
-
-    def is_payload_connected(self) -> bool:
-        with self._lock:
-            return self.payload_connected
 
     def is_arm_connected(self) -> bool:
         with self._lock:
@@ -408,16 +407,6 @@ class _DataStore:
         with self._lock:
             return {k: dict(v) for k, v in self.comms.items()}
 
-    def get_payload_arduino(self) -> dict:
-        with self._lock:
-            return dict(self.payload_arduino)
-
-    def get_life_analysis(self) -> dict:
-        with self._lock:
-            analysis = dict(self.life_analysis)
-            analysis["radar"] = dict(analysis["radar"]) if isinstance(analysis["radar"], dict) else analysis["radar"]
-            return analysis
-
     def get_led_controller(self) -> dict:
         with self._lock:
             controller = dict(self.led_controller)
@@ -429,9 +418,6 @@ class _DataStore:
             "mode": "live" if ROS2_AVAILABLE else "ros2_unavailable",
             "publishes": [
                 {"topic": config.estop_topic, "type": "std_msgs/Bool", "purpose": "Emergency stop state"},
-                {"topic": config.elevator_topic, "type": "std_msgs/Float32", "purpose": "Payload elevator step command"},
-                {"topic": config.carousel_topic, "type": "std_msgs/Float32", "purpose": "Payload carousel step command"},
-                {"topic": config.auger_topic, "type": "std_msgs/Float32", "purpose": "Payload auger speed command"},
                 {"topic": config.led_arduino_360_capture_topic, "type": "std_msgs/UInt8MultiArray", "purpose": "360 camera servo/capture byte command"},
             ],
             "subscribes": [
@@ -450,11 +436,8 @@ class _DataStore:
                 {"topic": config.battery_topic, "type": "sensor_msgs/BatteryState", "purpose": "Battery telemetry"},
                 {"topic": config.jetson_temp_topic, "type": "std_msgs/Float32", "purpose": "Jetson temperature"},
                 {"topic": config.jetson_ip_topic, "type": "std_msgs/String", "purpose": "Jetson IP on the rover/ground-station network"},
-                {"topic": config.payload_temperature_topic, "type": "std_msgs/Float32", "purpose": "Payload Arduino temperature"},
-                {"topic": config.payload_moisture_topic, "type": "std_msgs/Float32", "purpose": "Payload Arduino moisture"},
                 {"topic": config.led_arduino_status_topic, "type": "std_msgs/Bool", "purpose": "LED Arduino online state"},
                 {"topic": config.led_arduino_360_camera_topic, "type": "std_msgs/Bool", "purpose": "360 camera online/streaming state"},
-                {"topic": config.payload_status_topic, "type": "std_msgs/Bool", "purpose": "Payload subsystem online state"},
                 {"topic": config.arm_status_topic, "type": "std_msgs/Bool", "purpose": "Arm subsystem online state"},
                 {"topic": config.drive_status_topic, "type": "std_msgs/Bool", "purpose": "Drive subsystem online state"},
                 {"topic": config.link_24ghz_topic, "type": "std_msgs/Float32", "purpose": "2.4 GHz link stability"},
@@ -872,11 +855,8 @@ if ROS2_AVAILABLE:
             self.create_subscription(BatteryState, config.battery_topic, self._battery_cb, 10)
             self.create_subscription(Float32, config.jetson_temp_topic, self._jetson_temp_cb, 5)
             self.create_subscription(String, config.jetson_ip_topic, self._jetson_ip_cb, 5)
-            self.create_subscription(Float32, config.payload_temperature_topic, self._payload_temperature_cb, 5)
-            self.create_subscription(Float32, config.payload_moisture_topic, self._payload_moisture_cb, 5)
             self.create_subscription(Bool, config.led_arduino_status_topic, self._led_arduino_status_cb, 5)
             self.create_subscription(Bool, config.led_arduino_360_camera_topic, self._camera_360_status_cb, 5)
-            self.create_subscription(Bool, config.payload_status_topic, self._payload_status_cb, 5)
             self.create_subscription(Bool, config.arm_status_topic, self._arm_status_cb, 5)
             self.create_subscription(Bool, config.drive_status_topic, self._drive_status_cb, 5)
             if SPARK_TELEMETRY_AVAILABLE:
@@ -893,13 +873,9 @@ if ROS2_AVAILABLE:
 
             # publishers
             self._estop_pub = self.create_publisher(Bool, config.estop_topic, 1)
-            self._elevator_pub = self.create_publisher(Float32, config.elevator_topic, 10)
-            self._carousel_pub = self.create_publisher(Float32, config.carousel_topic, 10)
-            self._auger_pub = self.create_publisher(Float32, config.auger_topic, 10)
             self._camera360_capture_pub = self.create_publisher(UInt8MultiArray, config.led_arduino_360_capture_topic, 10)
             self._drive_clear_faults_pub = self.create_publisher(UInt8, config.drive_clear_faults_topic, 10)
             self._arm_clear_faults_pub = self.create_publisher(UInt8, config.arm_clear_faults_topic, 10)
-            self.create_timer(1.0, self._payload_graph_health_cb)
 
         def _make_cam_cb(self, cam_id: str):
             def cb(msg: Image):
@@ -968,14 +944,21 @@ if ROS2_AVAILABLE:
             return cb
 
         def _battery_cb(self, msg: BatteryState):
-            with store._lock:
-                store.telemetry["soc"] = round(msg.percentage * 100, 1)
-                store.telemetry["current"] = round(abs(msg.current), 2)
-                store.telemetry["voltage"] = round(msg.voltage, 2)
+            store.set_telemetry_field("soc", round(msg.percentage * 100, 1))
+            store.set_telemetry_field("current", round(abs(msg.current), 2))
+            store.set_telemetry_field("voltage", round(msg.voltage, 2))
+            temperature = float(getattr(msg, "temperature", float("nan")))
+            if math.isfinite(temperature):
+                store.set_telemetry_field("temperature", round(temperature, 1))
 
         def _jetson_temp_cb(self, msg: Float32):
+            raw_temp = float(msg.data)
+            if not math.isfinite(raw_temp):
+                return
+            temp = round(raw_temp, 1)
             with store._lock:
-                store.system["jetson_temp"] = round(msg.data, 1)
+                store.system["jetson_temp"] = temp
+            store.set_telemetry_field("temperature", temp)
 
         def _jetson_ip_cb(self, msg: String):
             ip = str(msg.data or "").strip()
@@ -983,16 +966,6 @@ if ROS2_AVAILABLE:
                 store.system["jetson_ip"] = ip or None
                 store.system["rover_current_ip"] = ip or None
                 store.system["rover_ips"] = [ip] if ip else []
-
-        def _payload_temperature_cb(self, msg: Float32):
-            with store._lock:
-                store.payload_arduino["temperature_c"] = round(float(msg.data), 1)
-                store.payload_arduino["last_update_s"] = round(time.time() - store._start_time, 1)
-
-        def _payload_moisture_cb(self, msg: Float32):
-            with store._lock:
-                store.payload_arduino["moisture_pct"] = round(float(msg.data), 1)
-                store.payload_arduino["last_update_s"] = round(time.time() - store._start_time, 1)
 
         def _led_arduino_status_cb(self, msg: Bool):
             with store._lock:
@@ -1004,12 +977,6 @@ if ROS2_AVAILABLE:
                 store.led_controller["camera_360_connected"] = msg.data
                 store.led_controller["camera_360_streaming"] = msg.data
                 store.led_controller["last_update_s"] = round(time.time() - store._start_time, 1)
-
-        def _payload_status_cb(self, msg: Bool):
-            with store._lock:
-                store.payload_connected = msg.data
-                store.subsystems["payload"]["connected"] = msg.data
-                store.payload_arduino["connected"] = msg.data
 
         def _arm_status_cb(self, msg: Bool):
             with store._lock:
@@ -1033,28 +1000,6 @@ if ROS2_AVAILABLE:
                     store.comms[link_key]["status"] = status
             return cb
 
-        def _payload_graph_health_cb(self):
-            pub_active = bool(
-                self.get_publishers_info_by_topic(config.payload_temperature_topic)
-                or self.get_publishers_info_by_topic(config.payload_moisture_topic)
-            )
-            sub_active = bool(
-                self.get_subscriptions_info_by_topic(config.elevator_topic)
-                or self.get_subscriptions_info_by_topic(config.carousel_topic)
-                or self.get_subscriptions_info_by_topic(config.auger_topic)
-            )
-            with store._lock:
-                store.payload_arduino["publisher_active"] = pub_active
-                store.payload_arduino["subscriber_active"] = sub_active
-                store.payload_arduino["connected"] = store.payload_connected and pub_active and sub_active
-                moisture = store.payload_arduino.get("moisture_pct")
-                moisture_value = f"{moisture:.1f} %" if isinstance(moisture, (int, float)) else "--"
-                store.subsystems["payload"]["metrics"] = [
-                    {"label": "Arduino Pub", "value": "Active" if pub_active else "Offline"},
-                    {"label": "Arduino Sub", "value": "Active" if sub_active else "Offline"},
-                    {"label": "Moisture", "value": moisture_value},
-                ]
-
         # --- publishers -------------------------------------------------------
         def _publish_redundant(self, publisher, msg, label: str):
             count = max(1, int(config.command_publish_redundancy))
@@ -1070,21 +1015,6 @@ if ROS2_AVAILABLE:
             self._publish_redundant(self._estop_pub, m, "E-STOP command")
             store.add_log("WARN" if active else "INFO",
                           f"E-STOP {'ACTIVATED' if active else 'RESET'}", "estop")
-
-        def publish_elevator(self, mm: float):
-            m = Float32()
-            m.data = float(mm)
-            self._publish_redundant(self._elevator_pub, m, "Elevator command")
-
-        def publish_carousel(self, steps: float):
-            m = Float32()
-            m.data = float(steps)
-            self._publish_redundant(self._carousel_pub, m, "Carousel command")
-
-        def publish_auger(self, speed: float):
-            m = Float32()
-            m.data = float(speed)
-            self._publish_redundant(self._auger_pub, m, "Auger command")
 
         def publish_camera360_capture(self, command_bytes: list[int]):
             m = UInt8MultiArray()
@@ -1246,6 +1176,33 @@ class ROS2Bridge:
         store.add_log("INFO", f"Stopped camera {camera_id}", "camera")
         return next((c for c in store.get_cameras() if c.get("id") == camera_id), {"id": camera_id, "streaming": False})
 
+    def reset_camera(self, camera_id: str) -> dict:
+        camera_id = str(camera_id)
+        if config.camera_source != "udp":
+            store.update_camera(camera_id, streaming=False, stream_budget=None)
+            store.clear_camera_frame(camera_id)
+            return {"id": camera_id, "streaming": False, "reset": "local"}
+
+        reset_error = None
+        try:
+            res = _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id, safe='')}/reset", {}, timeout=4.0)
+            store.add_log("INFO", f"Reset rover camera {camera_id}", "camera")
+            camera = res.get("camera", {"id": camera_id})
+        except RuntimeError as e:
+            reset_error = str(e)
+            try:
+                res = _rover_request("POST", f"/cameras/{urllib.parse.quote(camera_id, safe='')}/stop", {}, timeout=3.0)
+                store.add_log("WARN", f"Camera reset endpoint unavailable for {camera_id}; used stop fallback", "camera")
+                camera = res.get("camera", {"id": camera_id})
+            except RuntimeError as stop_error:
+                store.add_log("WARN", f"Could not reset camera {camera_id}: {reset_error}; stop fallback failed: {stop_error}", "camera")
+                camera = {"id": camera_id, "reset_error": reset_error, "stop_error": str(stop_error)}
+
+        camera.update({"streaming": False, "stream_budget": None})
+        store.update_camera(camera_id, **camera)
+        store.clear_camera_frame(camera_id)
+        return camera
+
     def _rebalance_udp_camera_streams(self, client_ip: str):
         if not config.rover_camera_max_total_bitrate:
             return
@@ -1342,9 +1299,6 @@ class ROS2Bridge:
             "rover_ips": [],
         }
 
-    def is_payload_connected(self) -> bool:
-        return store.is_payload_connected()
-
     def is_arm_connected(self) -> bool:
         return store.is_arm_connected()
 
@@ -1356,12 +1310,6 @@ class ROS2Bridge:
 
     def get_comms(self) -> dict:
         return store.get_comms()
-
-    def get_payload_arduino(self) -> dict:
-        return store.get_payload_arduino()
-
-    def get_life_analysis(self) -> dict:
-        return store.get_life_analysis()
 
     def get_led_controller(self) -> dict:
         return store.get_led_controller()
@@ -1392,20 +1340,6 @@ class ROS2Bridge:
     def send_estop(self, active: bool = True):
         self._require_node().publish_estop(active)
 
-    def send_elevator(self, steps: int):
-        direction = "UP" if steps > 0 else "DOWN"
-        store.add_log("INFO", f"Elevator step command: {direction} {abs(steps)} steps", "payload")
-        self._require_node().publish_elevator(float(steps))
-
-    def send_carousel(self, steps: float):
-        direction = "CW" if steps > 0 else "CCW"
-        store.add_log("INFO", f"Carousel command: {direction} {abs(steps)} steps", "payload")
-        self._require_node().publish_carousel(steps)
-
-    def send_auger(self, speed: float, enabled: bool):
-        store.add_log("INFO", f"Auger command: {'ON' if enabled else 'OFF'} @ {speed:.0f}%", "payload")
-        self._require_node().publish_auger(speed if enabled else 0.0)
-
     def clear_motor_faults(self, group: str, device_id: int):
         group = group.lower()
         if group not in ("drive", "arm"):
@@ -1418,19 +1352,6 @@ class ROS2Bridge:
             "can",
         )
         self._require_node().publish_clear_motor_faults(group, device_id)
-
-    def start_life_analysis(self):
-        now = time.time()
-        with store._lock:
-            store.life_analysis["running"] = True
-            store.life_analysis["last_started_s"] = now
-        store.add_log("INFO", "Payload life analysis start requested", "payload")
-
-    def set_life_analysis_radar(self, radar: dict):
-        with store._lock:
-            store.life_analysis["radar"] = dict(radar)
-            store.life_analysis["running"] = False
-        store.add_log("INFO", "Payload life analysis radar output received", "payload")
 
     def capture_360_image(self) -> dict:
         command_bytes = [0xA5, 0x36, 0x00, 0x5A, random.randint(0, 255), 0xC3]

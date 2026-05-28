@@ -16,7 +16,6 @@ const CAMERA_START_JITTER_MS = Math.floor(Math.random() * 2000);
 // ── Global state ─────────────────────────────────────────────
 const state = {
   estopActive: false,
-  augerOn: false,
   hiddenCameras: new Set(),
   visibleCameras: new Set(),
   cameraRotations: {},
@@ -27,6 +26,8 @@ const state = {
   nativeCameras: new Set(),
   nativeCameraUrls: {},
   nativeCameraUrlIndex: {},
+  cameraRetryTimers: {},
+  cameraRetryAttempts: {},
   cameraDecodeMode: 'browser',
   cameraVisibilitySaved: false,
   cameras: [],
@@ -109,7 +110,7 @@ function getClientId() {
 
 const TOAST_ICONS = { error: '⊗', warn: '⚠', info: 'ℹ', success: '✓' };
 const IMPORTANT_LOG_SOURCES = new Set([
-  'ros2', 'bridge', 'rclpy', 'estop', 'can', 'drive', 'arm', 'payload', 'comms', 'radio', 'battery'
+  'ros2', 'bridge', 'rclpy', 'estop', 'can', 'drive', 'arm', 'comms', 'radio', 'battery'
 ]);
 
 function showToast(type, title, message, duration = 5000) {
@@ -449,11 +450,9 @@ function handleTelemetryMsg(msg) {
   if (msg.type !== 'telemetry') return;
   updateTelemetry(msg.telemetry);
   updateGPS(msg.gnss);
-  updateSubsysStatus(msg.payload_connected, msg.arm_connected, msg.drive_connected);
+  updateSubsysStatus(msg.arm_connected, msg.drive_connected);
   updateSubsystemOverview(msg.subsystems || {});
   updateComms(msg.comms || {});
-  updatePayloadArduino(msg.payload_arduino || {});
-  updateLifeAnalysis(msg.life_analysis || {});
   updateLedController(msg.led_controller || {});
   updateMotorTelemetry(msg.motor_telemetry || {});
 }
@@ -476,19 +475,32 @@ function levelClassInv(value, warn, crit) {
   return 'ok';
 }
 
-function applyTelemetryCard(id, barId, badgeId, value, maxVal, cls) {
+function telemetryField(t, key) {
+  const value = t?.[key];
+  const meta = t?._meta?.[key] || {};
+  return {
+    value,
+    stale: meta.stale === true && asFiniteNumber(value) !== null,
+    age_s: asFiniteNumber(meta.age_s),
+  };
+}
+
+function applyTelemetryCard(id, barId, badgeId, field, maxVal, cls) {
   const card  = document.getElementById(id);
   const bar   = document.getElementById(barId);
   const badge = document.getElementById(badgeId);
   if (!card || !bar || !badge) return;
+  const value = field && typeof field === 'object' && 'value' in field ? field.value : field;
+  const stale = field && typeof field === 'object' && field.stale === true;
   const n = asFiniteNumber(value);
   const pct = n === null ? 0 : Math.min(100, Math.max(0, (n / maxVal) * 100));
+  const displayCls = stale && cls !== 'crit' ? 'warn' : cls;
 
   bar.style.width     = pct + '%';
-  card.className      = 'telem-card' + (cls !== 'ok' ? ` state-${cls}` : '');
-  bar.className       = 'telem-bar'  + (cls !== 'ok' ? ` ${cls}` : '');
-  badge.className     = 'telem-badge' + (cls !== 'ok' ? ` ${cls}` : '');
-  badge.textContent   = n === null ? 'NO DATA' : cls.toUpperCase();
+  card.className      = 'telem-card' + (displayCls !== 'ok' ? ` state-${displayCls}` : '');
+  bar.className       = 'telem-bar'  + (displayCls !== 'ok' ? ` ${displayCls}` : '');
+  badge.className     = 'telem-badge' + (displayCls !== 'ok' ? ` ${displayCls}` : '');
+  badge.textContent   = n === null ? 'NO DATA' : stale ? 'STALE' : cls.toUpperCase();
 }
 
 function updateTelemetry(t) {
@@ -496,19 +508,23 @@ function updateTelemetry(t) {
   t = t || {};
   const w = state.warnings;
 
-  const socCls = levelClassInv(t.soc, w.soc.warning, w.soc.critical);
-  document.getElementById('socVal').textContent = fmtNumber(t.soc, 1);
-  applyTelemetryCard('socCard', 'socBar', 'socBadge', t.soc, 100, socCls);
+  const soc = telemetryField(t, 'soc');
+  const socCls = levelClassInv(soc.value, w.soc.warning, w.soc.critical);
+  document.getElementById('socVal').textContent = fmtNumber(soc.value, 1);
+  applyTelemetryCard('socCard', 'socBar', 'socBadge', soc, 100, socCls);
 
-  const curCls = levelClass(t.current, w.cur.warning, w.cur.critical);
-  document.getElementById('curVal').textContent = fmtNumber(t.current, 1);
-  applyTelemetryCard('curCard', 'curBar', 'curBadge', t.current, w.cur.critical * 1.2, curCls);
+  const cur = telemetryField(t, 'current');
+  const curCls = levelClass(cur.value, w.cur.warning, w.cur.critical);
+  document.getElementById('curVal').textContent = fmtNumber(cur.value, 1);
+  applyTelemetryCard('curCard', 'curBar', 'curBadge', cur, w.cur.critical * 1.2, curCls);
 
-  const tempCls = levelClass(t.temperature, w.temp.warning, w.temp.critical);
-  document.getElementById('tempVal').textContent = fmtNumber(t.temperature, 1);
-  applyTelemetryCard('tempCard', 'tempBar', 'tempBadge', t.temperature, w.temp.critical * 1.2, tempCls);
+  const temp = telemetryField(t, 'temperature');
+  const tempCls = levelClass(temp.value, w.temp.warning, w.temp.critical);
+  document.getElementById('tempVal').textContent = fmtNumber(temp.value, 1);
+  applyTelemetryCard('tempCard', 'tempBar', 'tempBadge', temp, w.temp.critical * 1.2, tempCls);
 
-  document.getElementById('voltVal').textContent = fmtNumber(t.voltage, 1);
+  const voltage = telemetryField(t, 'voltage');
+  document.getElementById('voltVal').textContent = fmtNumber(voltage.value, 1);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -890,7 +906,7 @@ function initCameras() {
   document.getElementById('showAllCamerasBtn')?.addEventListener('click', showAllCameras);
   document.getElementById('saveCameraBitrateBtn')?.addEventListener('click', saveCameraSettings);
   document.getElementById('closeCameraStillModal')?.addEventListener('click', closeCameraStillModal);
-  refreshCameras(false).catch(() => renderCameraGrid());
+  refreshCameras(true, { quiet: true }).catch(() => renderCameraGrid());
   setInterval(refreshCameraStatus, 3000);
 }
 
@@ -952,7 +968,7 @@ function setCameraDecodeMode(mode) {
   }));
 }
 
-async function refreshCameras(force = true) {
+async function refreshCameras(force = true, options = {}) {
   const priorIds = cameraIdsSignature();
   let res;
   try {
@@ -960,7 +976,7 @@ async function refreshCameras(force = true) {
       ? await apiFetch('/api/cameras/refresh', { method: 'POST' })
       : await apiFetch('/api/cameras');
   } catch (err) {
-    if (force) showToast('error', 'Camera Refresh Failed', err.message);
+    if (force && !options.quiet) showToast('error', 'Camera Refresh Failed', err.message);
     throw err;
   }
   state.cameras = res.cameras || [];
@@ -978,7 +994,18 @@ async function refreshCameras(force = true) {
 }
 
 async function refreshCameraStatus() {
-  if (!state.cameras.length) return;
+  if (!state.cameras.length) {
+    try {
+      const res = await apiFetch('/api/cameras/refresh', { method: 'POST' });
+      state.cameras = res.cameras || [];
+      applyServerCameraRotations();
+      if (state.cameras.length) {
+        renderCameraGrid();
+        renderCameraVisibility();
+      }
+    } catch (_) {}
+    return;
+  }
   try {
     const res = await apiFetch('/api/cameras');
     state.cameras = res.cameras || [];
@@ -1002,11 +1029,46 @@ function retryCam(id) {
   scheduleShowCamera(id, { quiet: true, delayMs: 500 });
 }
 
+function clearCameraRetry(id) {
+  id = String(id);
+  if (state.cameraRetryTimers[id]) clearTimeout(state.cameraRetryTimers[id]);
+  delete state.cameraRetryTimers[id];
+  state.cameraRetryAttempts[id] = 0;
+}
+
+function scheduleCameraRecovery(id, reason = '') {
+  id = String(id);
+  if (state.hiddenCameras.has(id) || state.cameraRetryTimers[id]) return;
+  const attempt = Number(state.cameraRetryAttempts[id] || 0) + 1;
+  state.cameraRetryAttempts[id] = attempt;
+  const delayMs = Math.min(30000, 1500 * (2 ** Math.min(attempt - 1, 5))) + Math.floor(Math.random() * 750);
+  setCameraStatus(
+    id,
+    'error',
+    'Recovering camera stream',
+    `${reason || 'The direct rover stream failed.'} Resetting this camera and retrying in ${(delayMs / 1000).toFixed(1)} seconds.`
+  );
+  state.cameraRetryTimers[id] = setTimeout(async () => {
+    delete state.cameraRetryTimers[id];
+    if (state.hiddenCameras.has(id)) return;
+    setCameraStatus(id, 'connecting', 'Resetting rover camera', 'Requesting a per-camera reset before reopening the direct stream.');
+    try {
+      await apiFetch(`/api/camera/${encodeURIComponent(id)}/reset`, { method: 'POST' });
+    } catch (err) {
+      showToast('warn', 'Camera Reset Failed', err.message, 3500);
+    }
+    retryCam(id);
+  }, delayMs);
+}
+
 function stopNativeCamera(id) {
   id = String(id);
   nextCameraStartSeq(id);
   if (state.cameraConnectTimers[id]) clearTimeout(state.cameraConnectTimers[id]);
   delete state.cameraConnectTimers[id];
+  if (state.cameraRetryTimers[id]) clearTimeout(state.cameraRetryTimers[id]);
+  delete state.cameraRetryTimers[id];
+  delete state.cameraRetryAttempts[id];
   clearCameraStatusTimer(id);
   state.nativeCameras.delete(id);
   delete state.nativeCameraUrls[id];
@@ -1029,6 +1091,8 @@ function stopNativeCamera(id) {
 function releaseCameraElements() {
   Object.values(state.cameraConnectTimers || {}).forEach(timer => clearTimeout(timer));
   state.cameraConnectTimers = {};
+  Object.values(state.cameraRetryTimers || {}).forEach(timer => clearTimeout(timer));
+  state.cameraRetryTimers = {};
   document.querySelectorAll('.camera-img').forEach(img => {
     img.removeAttribute('src');
   });
@@ -1048,6 +1112,7 @@ function setNativeCameraSource(id, index = 0) {
   state.nativeCameraUrlIndex[id] = index;
   const sep = url.includes('?') ? '&' : '?';
   img.removeAttribute('src');
+  img.dataset.lastSourceSetAt = String(Date.now());
   img.src = `${url}${sep}_=${Date.now()}`;
   img.classList.remove('hidden');
   return true;
@@ -1061,7 +1126,13 @@ function waitForNativeFrame(id, seq, readyDelayMs = 2500) {
     if (img?.naturalWidth) {
       setCameraStatus(id, 'live', 'Browser decode', '');
     } else {
-      setCameraStatus(id, 'connecting', 'Waiting for first frame', 'The stream URL is open, but this browser has not decoded a camera frame yet.');
+      const nextIndex = Number(state.nativeCameraUrlIndex[id] || 0) + 1;
+      if (setNativeCameraSource(id, nextIndex)) {
+        setCameraStatus(id, 'connecting', 'Trying alternate browser stream', 'The first direct rover URL opened but did not produce a frame.');
+        waitForNativeFrame(id, seq, readyDelayMs);
+      } else {
+        scheduleCameraRecovery(id, 'The stream URL opened but did not produce a frame.');
+      }
     }
   };
   clearCameraStatusTimer(id);
@@ -1362,7 +1433,7 @@ function renderCameraGrid() {
           setCameraStatus(id, 'connecting', 'Trying alternate browser stream', 'The first direct rover URL was not reachable from this computer, so the browser is trying another discovered camera-service address.');
           return;
         }
-        setCameraStatus(id, 'error', 'Local feed unavailable', 'This computer could not read the direct rover MJPEG stream. Check rover camera service access.');
+        scheduleCameraRecovery(id, 'This computer could not read any direct rover MJPEG URL.');
         return;
       }
       setCameraStatus(id, 'error', 'Feed unavailable', 'The browser could not read the MJPEG stream. Retrying while the camera remains visible.');
@@ -1370,6 +1441,7 @@ function renderCameraGrid() {
     });
     img.addEventListener('load', () => {
       clearCameraStatusTimer(id);
+      clearCameraRetry(id);
       setCameraStatus(id, 'live', 'Local decode', '');
       applyCameraRotation(id);
     });
@@ -1381,7 +1453,7 @@ function renderCameraGrid() {
       video.addEventListener('error', () => {
         if (!state.nativeCameras.has(id)) return;
         clearCameraStatusTimer(id);
-        setCameraStatus(id, 'error', 'Local feed unavailable', 'The browser could not play the direct rover stream. Restart the rover camera service or check network access.');
+        scheduleCameraRecovery(id, 'The browser could not play the direct rover stream.');
       });
     }
     applyCameraRotation(id);
@@ -1759,24 +1831,15 @@ function formatBytes(bytes) {
 // SYSTEM OVERVIEW
 // ══════════════════════════════════════════════════════════════
 
-function updateSubsysStatus(payloadConn, armConn, driveConn) {
+function updateSubsysStatus(armConn, driveConn) {
   updateControllerTopicHealth(armConn, driveConn);
 
-  const pd = document.querySelector('#sysPayloadConn .status-dot');
-  if (pd) {
-    pd.className = `status-dot ${payloadConn ? 'dot-green' : 'dot-red'}`;
-    document.getElementById('sysPayloadVal').textContent = payloadConn ? 'Connected' : 'Disconnected';
-  }
   const ad = document.querySelector('#sysArmConn .status-dot');
   if (ad) {
     ad.className = `status-dot ${armConn ? 'dot-green' : 'dot-red'}`;
     document.getElementById('sysArmVal').textContent = armConn ? 'Connected' : 'Disconnected';
   }
 
-  updateSubsysHeader('payload', payloadConn);
-
-  const pb = document.getElementById('payloadBody');
-  if (pb) pb.classList.toggle('greyed', !payloadConn);
   const dd = document.querySelector('#sysDriveConn .status-dot');
   if (dd) {
     dd.className = `status-dot ${driveConn ? 'dot-green' : 'dot-red'}`;
@@ -1811,14 +1874,6 @@ function updateControllerTopicHealth(armConn, driveConn) {
   setHealth('drive', !!driveConn);
 }
 
-function updateSubsysHeader(name, connected) {
-  const dot   = document.getElementById(`${name}Dot`);
-  const label = document.getElementById(`${name}StatusLabel`);
-  if (!dot || !label) return;
-  dot.className     = `status-dot ${connected ? 'dot-green' : 'dot-red'}`;
-  label.textContent = `${name.charAt(0).toUpperCase() + name.slice(1)} — ${connected ? 'Connected' : 'Disconnected'}`;
-}
-
 async function refreshSystemData() {
   try {
     const d = await apiFetch('/api/system');
@@ -1837,8 +1892,6 @@ async function refreshSystemData() {
     updateSubsystemOverview(d.subsystems || {});
     updateComms(d.comms || {});
     updateSystemHealth(d);
-    updatePayloadArduino(d.payload_arduino || {});
-    updateLifeAnalysis(d.life_analysis || {});
     updateLedController(d.led_controller || {});
     updateMotorTelemetry(d.motor_telemetry || {});
   } catch (_) {
@@ -1857,7 +1910,6 @@ function setHealthStatus(dotId, valId, stateName, label) {
 
 function updateSystemHealth(d) {
   const subsystems = d.subsystems || {};
-  if (subsystems.payload) updateSystemHealthConnection('sysPayloadConn', 'sysPayloadVal', subsystems.payload);
   if (subsystems.arm) updateSystemHealthConnection('sysArmConn', 'sysArmVal', subsystems.arm);
   if (subsystems.drive) updateSystemHealthConnection('sysDriveConn', 'sysDriveVal', subsystems.drive);
 
@@ -1899,41 +1951,6 @@ function updateSystemHealthConnection(itemId, valId, subsystem) {
 function setStatusDot(dotId, value) {
   const dot = document.getElementById(dotId);
   if (dot) dot.className = `status-dot ${value ? 'dot-green' : 'dot-red'}`;
-}
-
-function updatePayloadArduino(a) {
-  a = a || {};
-  setStatusDot('payloadArduinoPubDot', !!a.publisher_active);
-  setStatusDot('payloadArduinoSubDot', !!a.subscriber_active);
-  setStatusDot('payloadArduinoConnDot', !!a.connected);
-  const pubVal = document.getElementById('payloadArduinoPubVal');
-  const subVal = document.getElementById('payloadArduinoSubVal');
-  const connVal = document.getElementById('payloadArduinoConnVal');
-  if (pubVal) pubVal.textContent = a.publisher_active ? 'Active' : 'Not detected';
-  if (subVal) subVal.textContent = a.subscriber_active ? 'Active' : 'Not detected';
-  if (connVal) connVal.textContent = a.connected ? 'Connected' : 'Disconnected';
-  const tempEl = document.getElementById('payloadTempVal');
-  const moistureEl = document.getElementById('payloadMoistureVal');
-  if (tempEl) tempEl.textContent = fmtNumber(a.temperature_c, 1);
-  if (moistureEl) moistureEl.textContent = fmtNumber(a.moisture_pct, 1);
-}
-
-function updateLifeAnalysis(life) {
-  const status = document.getElementById('lifeAnalysisStatus');
-  if (!status) return;
-  status.textContent = life.running ? 'Running analysis...' : life.radar ? 'Radar output loaded' : 'Idle';
-  if (life.radar?.image_data_url) {
-    renderRadarGraph(life.radar.image_data_url);
-  }
-}
-
-function renderRadarGraph(dataUrl) {
-  const output = document.getElementById('radarOutput');
-  const img = document.getElementById('radarGraphImg');
-  if (!output || !img) return;
-  output.querySelector('span')?.classList.add('hidden');
-  img.src = dataUrl;
-  img.classList.remove('hidden');
 }
 
 function updateLedController(c) {
@@ -2119,7 +2136,7 @@ function initNetwork() {
 function updateSubsystemOverview(subsystems) {
   const grid = document.getElementById('subsystemOverviewGrid');
   if (!grid) return;
-  const order = ['payload', 'arm', 'drive'];
+  const order = ['arm', 'drive'];
   grid.innerHTML = order.map(key => {
     const s = subsystems[key] || {};
     const connected = s.connected === true;
@@ -2227,121 +2244,6 @@ function initMotorControls() {
 }
 
 // ══════════════════════════════════════════════════════════════
-// PAYLOAD CONTROLS
-// ══════════════════════════════════════════════════════════════
-
-function initPayloadControls() {
-  document.getElementById('elevatorUp').addEventListener('click',   () => sendElevator('up'));
-  document.getElementById('elevatorDown').addEventListener('click', () => sendElevator('down'));
-  document.getElementById('carouselCW').addEventListener('click',   () => sendCarousel('cw'));
-  document.getElementById('carouselCCW').addEventListener('click',  () => sendCarousel('ccw'));
-
-  document.getElementById('augerSlider').addEventListener('input', e => {
-    document.getElementById('augerPct').textContent = `${e.target.value}%`;
-  });
-
-  document.getElementById('augerToggle').addEventListener('click', () => {
-    state.augerOn = !state.augerOn;
-    const btn = document.getElementById('augerToggle');
-    btn.classList.toggle('on', state.augerOn);
-    document.getElementById('augerToggleLabel').textContent = state.augerOn ? 'ON' : 'OFF';
-    sendAuger();
-  });
-
-  document.getElementById('startLifeAnalysisBtn').addEventListener('click', startLifeAnalysis);
-  document.getElementById('lifeRadarFile').addEventListener('change', handleRadarFile);
-}
-
-async function sendElevator(direction) {
-  const steps = parseInt(document.getElementById('elevatorSteps').value, 10);
-  if (isNaN(steps) || steps <= 0) { showToast('warn', 'Elevator', 'Enter a valid step count'); return; }
-  const fb = document.getElementById('elevatorFeedback');
-  fb.textContent = `Sending ${direction.toUpperCase()} ${steps} steps...`;
-  try {
-    await apiFetch('/api/payload/elevator', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ direction, steps }),
-    });
-    fb.textContent = `✓ ${direction.toUpperCase()} ${steps} steps sent`;
-  } catch (err) {
-    fb.textContent = `⊗ ${err.message}`;
-    showToast('error', 'Elevator Command Failed', err.message);
-  }
-}
-
-async function sendCarousel(direction) {
-  const steps = parseInt(document.getElementById('carouselSteps').value, 10);
-  if (isNaN(steps) || steps <= 0) { showToast('warn', 'Carousel', 'Enter a valid step count'); return; }
-  const fb = document.getElementById('carouselFeedback');
-  fb.textContent = `Sending ${direction.toUpperCase()} ${steps} steps…`;
-  try {
-    await apiFetch('/api/payload/carousel', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ direction, steps }),
-    });
-    fb.textContent = `✓ ${direction.toUpperCase()} ${steps} steps sent`;
-  } catch (err) {
-    fb.textContent = `⊗ ${err.message}`;
-    showToast('error', 'Carousel Command Failed', err.message);
-  }
-}
-
-async function sendAuger() {
-  const speed = parseInt(document.getElementById('augerSlider').value, 10);
-  const fb = document.getElementById('augerFeedback');
-  fb.textContent = `Sending auger ${state.augerOn ? 'ON' : 'OFF'} @ ${speed}%…`;
-  try {
-    await apiFetch('/api/payload/auger', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ speed, enabled: state.augerOn }),
-    });
-    fb.textContent = `✓ Auger ${state.augerOn ? 'ON' : 'OFF'} @ ${speed}%`;
-  } catch (err) {
-    fb.textContent = `⊗ ${err.message}`;
-    showToast('error', 'Auger Command Failed', err.message);
-    // Roll back toggle
-    state.augerOn = !state.augerOn;
-    const btn = document.getElementById('augerToggle');
-    btn.classList.toggle('on', state.augerOn);
-    document.getElementById('augerToggleLabel').textContent = state.augerOn ? 'ON' : 'OFF';
-  }
-}
-
-async function startLifeAnalysis() {
-  const status = document.getElementById('lifeAnalysisStatus');
-  status.textContent = 'Starting analysis...';
-  try {
-    const res = await apiFetch('/api/payload/life-analysis/start', { method: 'POST' });
-    updateLifeAnalysis(res.life_analysis || {});
-    showToast('info', 'Life Analysis', 'Start signal sent');
-  } catch (err) {
-    status.textContent = `Error: ${err.message}`;
-    showToast('error', 'Life Analysis Failed', err.message);
-  }
-}
-
-function handleRadarFile(e) {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = async () => {
-    const image_data_url = String(reader.result || '');
-    renderRadarGraph(image_data_url);
-    document.getElementById('lifeAnalysisStatus').textContent = `Loaded ${file.name}`;
-    try {
-      await apiFetch('/api/payload/life-analysis/radar', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_data_url, summary: file.name }),
-      });
-    } catch (err) {
-      showToast('warn', 'Radar Save Failed', err.message);
-    }
-  };
-  reader.readAsDataURL(file);
-}
-
-// ══════════════════════════════════════════════════════════════
 // BOOT — called after successful authentication
 // ══════════════════════════════════════════════════════════════
 
@@ -2358,7 +2260,6 @@ function bootApp() {
   initGamepadPolling();
   initLogs();
   initFiles();
-  initPayloadControls();
   initMotorControls();
   initNetwork();
 
